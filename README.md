@@ -31,10 +31,10 @@
 ###
 
 ```
-git clone https://github.com/rudymohammadbali/Whisper-Transcriber.git
+git clone https://github.com/enggalrahardja/whisper-transcribe-translate.git
 ```
 ```
-cd Whisper-Transcriber
+cd whisper-transcribe-translate
 ```
 ```
 python setup.py

@@ -48,8 +48,7 @@ def transcribe(
     word_timestamps: bool = False,
     prepend_punctuations: str = "\"'“¿([{-",
     append_punctuations: str = "\"'.。,，!！?？:：”)]}、",
-    cancel_func: any,
-    **decode_options,
+    cancel_func: any,    progress_callback: any = None,    **decode_options,
 ):
     """
     Transcribe an audio file using Whisper
@@ -380,6 +379,11 @@ def transcribe(
 
             # update progress bar
             pbar.update(min(content_frames, seek) - previous_seek)
+
+            # Call progress callback with percentage
+            if progress_callback:
+                progress_percentage = int((min(content_frames, seek) / content_frames) * 100)
+                progress_callback(progress_percentage)
 
     return dict(
         text=tokenizer.decode(all_tokens[len(initial_prompt_tokens) :]),

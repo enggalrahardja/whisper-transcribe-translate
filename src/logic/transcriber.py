@@ -29,7 +29,7 @@ class Transcriber:
             "fp16": self.fp16
         }
 
-    def audio_recognition(self, cancel_func=any):
+    def audio_recognition(self, cancel_func=any, progress_callback=None):
         print("Audio Recognition started...")
         if self.language == "auto detection":
             audio = whisper.load_audio(self.audio)
@@ -40,10 +40,12 @@ class Transcriber:
             _, probs = self.load_model.detect_language(mel)
             detected_language = max(probs, key=probs.get)
             result = whisper.transcribe(model=self.load_model, audio=self.audio,
-                                        language=detected_language, **self.options, cancel_func=cancel_func)
+                                        language=detected_language, **self.options, cancel_func=cancel_func,
+                                        progress_callback=progress_callback)
         else:
             result = whisper.transcribe(model=self.load_model, audio=self.audio,
-                                        **self.options, language=self.language, cancel_func=cancel_func)
+                                        **self.options, language=self.language, cancel_func=cancel_func,
+                                        progress_callback=progress_callback)
 
         return result
 

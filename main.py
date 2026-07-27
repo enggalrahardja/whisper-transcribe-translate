@@ -1,5 +1,4 @@
 import os
-import webbrowser
 
 import customtkinter as ctk
 from PIL import Image
@@ -32,15 +31,9 @@ icons = {
     "subtitles": ctk.CTkImage(dark_image=Image.open(f"{icon_path}subtitles_dark.png"),
                               light_image=Image.open(f"{icon_path}subtitles_light.png"),
                               size=(30, 30)),
-    "paypal": ctk.CTkImage(dark_image=Image.open(f"{icon_path}paypal_dark.png"),
-                           light_image=Image.open(f"{icon_path}paypal_light.png"), size=(30, 30)),
     "settings": ctk.CTkImage(dark_image=Image.open(f"{icon_path}settings_dark.png"),
                              light_image=Image.open(f"{icon_path}settings_light.png"),
-                             size=(30, 30)),
-    "help": ctk.CTkImage(dark_image=Image.open(f"{icon_path}help_dark.png"),
-                         light_image=Image.open(f"{icon_path}help_light.png"), size=(30, 30)),
-    "github": ctk.CTkImage(dark_image=Image.open(f"{icon_path}github_dark.png"),
-                           light_image=Image.open(f"{icon_path}github_light.png"), size=(30, 30))
+                             size=(30, 30))
 }
 
 logo = f"{icon_path}logo.ico"
@@ -53,48 +46,17 @@ btn = {
     "font": ("Inter", 16)
 }
 
-secondary_btn = {
-    "width": 280,
-    "height": 100,
-    "fg_color": ("#221D21", "#2B2D30"),
-    "hover": False,
-    "border_width": 0,
-    "text_color": ("#FFFFFF", "#DFE1E5"),
-    "compound": "left",
-    "font": ("Inter", 16)
-}
-
-link_btn = {
-    "width": 140,
-    "height": 80,
-    "fg_color": "transparent",
-    "hover_color": ("#D3D5DB", "#2B2D30"),
-    "border_color": ("#D3D5DB", "#2B2D30"),
-    "border_width": 2,
-    "text_color": ("#000000", "#DFE1E5"),
-    "compound": "left",
-    "font": ("Inter", 16)
-}
-
-
-def help_link():
-    webbrowser.open("https://github.com/rudymohammadbali/Whisper-Transcriber/discussions/categories/q-a")
-
-
-def github_link():
-    webbrowser.open("https://github.com/rudymohammadbali")
-
-
-def paypal_link():
-    webbrowser.open("https://www.paypal.com/paypalme/iamironman0")
-
-
 class Testing(ctk.CTk):
     def __init__(self):
         super().__init__()
         self.geometry("620x720")
         self.resizable(False, False)
-        self.iconbitmap(logo)
+        # Use iconphoto for cross-platform compatibility
+        try:
+            icon_image = Image.open(f"{icon_path}logo.png")
+            self.iconphoto(True, icon_image)
+        except Exception:
+            pass  # Silently fail if icon can't be loaded
         self.title("Whisper Transcriber")
 
         settings_handler = SettingsHandler()
@@ -131,15 +93,7 @@ class Testing(ctk.CTk):
 
         btn_5 = ctk.CTkButton(self, text="Settings", font=("Inter", 16), text_color=("#FFFFFF", "#DFE1E5"), width=280,
                               height=100, image=icons["settings"], command=lambda: SettingsUI(parent=self))
-        btn_5.grid(row=4, column=0, padx=(20, 10), pady=20, sticky="nsew")
-        btn_6 = ctk.CTkButton(self, text="Support on PayPal", **secondary_btn, image=icons["paypal"],
-                              command=paypal_link)
-        btn_6.grid(row=4, column=1, padx=(10, 20), pady=20, sticky="nsew")
-
-        btn_7 = ctk.CTkButton(self, text="Github", **link_btn, image=icons["github"], command=github_link)
-        btn_7.grid(row=5, column=0, padx=20, pady=20, sticky="nsew")
-        btn_8 = ctk.CTkButton(self, text="Help", **link_btn, image=icons["help"], command=help_link)
-        btn_8.grid(row=5, column=1, padx=20, pady=20, sticky="nsew")
+        btn_5.grid(row=4, column=0, padx=20, pady=20, sticky="nsew", columnspan=2)
 
 
 app = Testing()

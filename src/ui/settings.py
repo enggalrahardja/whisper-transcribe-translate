@@ -2,7 +2,6 @@ import os
 import subprocess
 import sys
 import threading
-import webbrowser
 
 import customtkinter as ctk
 
@@ -118,11 +117,6 @@ languages = [
     "Sundanese",
 ]
 
-
-def help_link():
-    webbrowser.open("https://github.com/rudymohammadbali/Whisper-Transcriber/discussions/categories/q-a")
-
-
 class SettingsUI(ctk.CTkFrame):
     def __init__(self, parent):
         super().__init__(master=parent, width=620, height=720, fg_color=("#F2F0EE", "#1E1F22"), border_width=0)
@@ -142,7 +136,6 @@ class SettingsUI(ctk.CTkFrame):
         self.general_frame = None
         self.model_frame = None
         self.gpu_frame = None
-        self.reset_btn = None
         self.mic_dropdown = None
         self.mic_btn = None
 
@@ -163,9 +156,6 @@ class SettingsUI(ctk.CTkFrame):
         self.main_frame.grid_columnconfigure(0, weight=1)
 
         self.default_widget()
-
-        self.reset_btn = ctk.CTkButton(self, text="Reset", height=35, command=self.reset_callback, font=FONTS["normal"])
-        self.reset_btn.grid(row=3, column=0, padx=20, pady=0, sticky="w")
 
         self.grid(row=0, column=0, sticky="nsew")
 
@@ -333,24 +323,8 @@ class SettingsUI(ctk.CTkFrame):
                                                                command=self.change_color_theme)
         self.color_theme_btn.set(color_theme)
 
-        developer_label = ctk.CTkLabel(self.general_frame, text="Developer", font=FONTS["normal"])
-        developer_label.grid(row=2, column=0, padx=20, pady=10, sticky="w")
-        developer_value = ctk.CTkLabel(self.general_frame, text="@iamironman", font=FONTS["small"])
-        developer_value.grid(row=2, column=1, padx=20, pady=10, sticky="e")
-
-        released_label = ctk.CTkLabel(self.general_frame, text="Released", font=FONTS["normal"])
-        released_label.grid(row=3, column=0, padx=20, pady=10, sticky="w")
-        released_value = ctk.CTkLabel(self.general_frame, text="12/2/2023", font=FONTS["small"])
-        released_value.grid(row=3, column=1, padx=20, pady=10, sticky="e")
-
-        help_label = ctk.CTkLabel(self.general_frame, text="FAQ or Help Center", font=FONTS["normal"])
-        help_label.grid(row=4, column=0, padx=20, pady=10, sticky="w")
-        help_value = ctk.CTkButton(self.general_frame, text="Get help", font=FONTS["small"], command=help_link)
-        help_value.grid(row=4, column=1, padx=20, pady=10, sticky="e")
-
     def download_callback(self):
         self.close_btn.configure(state="disabled")
-        self.reset_btn.destroy()
         widgets = self.main_frame.winfo_children()
 
         for widget in widgets:
@@ -386,15 +360,6 @@ class SettingsUI(ctk.CTkFrame):
         self.close_btn.configure(state="normal")
         self.main_frame.grid(row=1, column=0, padx=20, pady=0, sticky="nsew", columnspan=2)
         self.after(1000, self.default_widget)
-
-    def reset_callback(self):
-        message = self.settings_handler.reset_settings()
-        for widget in self.main_frame.winfo_children():
-            widget.grid_forget()
-
-        self.default_widget()
-
-        CTkAlert(parent=self.master, status="success", title="Success", msg=message)
 
     def change_settings_value(self, key_name: str, new_value: str):
         self.settings_handler.save_settings(**{f"{key_name}": f"{new_value.lower()}"})

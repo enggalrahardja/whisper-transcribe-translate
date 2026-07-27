@@ -1,6 +1,8 @@
 import random
 import threading
 import tkinter as tk
+import os
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 from queue import Queue
 from time import sleep
@@ -11,10 +13,32 @@ import speech_recognition as sr
 import torch
 from .. import whisper
 
+from .ctkAlert import CTkAlert
 from .ctk_tooltip import CTkToolTip
 from .ctkdropdown import CTkScrollableDropdownFrame
 from .icons import icons
 from .style import FONTS, DROPDOWN
+
+
+@contextmanager
+def suppress_audio_backend_logs():
+    """Temporarily silence C-level stderr output from ALSA/JACK probing."""
+    saved_stderr_fd = None
+    devnull_fd = None
+
+    try:
+        devnull_fd = os.open(os.devnull, os.O_WRONLY)
+        saved_stderr_fd = os.dup(2)
+        os.dup2(devnull_fd, 2)
+        yield
+    finally:
+        if saved_stderr_fd is not None:
+            try:
+                os.dup2(saved_stderr_fd, 2)
+            finally:
+                os.close(saved_stderr_fd)
+        if devnull_fd is not None:
+            os.close(devnull_fd)
 
 
 class TkAudioVisualizer(tk.Frame):
@@ -210,6 +234,8 @@ class LiveTranscribeUI(ctk.CTkFrame):
         self.transcribe_thread = None
         self.record_thread = None
         self.paa_thread = None
+        self.source = None
+        self.microphone_error = None
 
         self.selected_model = "base"
         self.selected_language = "english"
@@ -223,8 +249,6 @@ class LiveTranscribeUI(ctk.CTkFrame):
         self.energy_threshold = 500
         self.recorder.energy_threshold = self.energy_threshold
         self.recorder.dynamic_energy_threshold = False
-
-        self.source = sr.Microphone(sample_rate=16000)
 
         self.record_timeout = 2
         self.phrase_timeout = 3
@@ -284,6 +308,9 @@ class LiveTranscribeUI(ctk.CTkFrame):
         self.text_box.grid(row=5, column=0, sticky="nsew", pady=(5, 20), columnspan=2)
 
     def start_callback(self):
+        if not self.initialize_microphone(show_alert=True):
+            return
+
         self.pause_play()
 
         self.record_thread = threading.Thread(target=self.start_recording)
@@ -327,7 +354,35 @@ class LiveTranscribeUI(ctk.CTkFrame):
         self.data_queue.put(data)
 
     def start_recording(self):
-        self.recorder.listen_in_background(self.source, self.record_callback, phrase_time_limit=self.record_timeout)
+        with suppress_audio_backend_logs():
+            self.recorder.listen_in_background(self.source, self.record_callback,
+                                               phrase_time_limit=self.record_timeout)
+
+    def initialize_microphone(self, show_alert: bool = False) -> bool:
+        if self.source is not None:
+            return True
+
+        try:
+            with suppress_audio_backend_logs():
+                self.source = sr.Microphone(sample_rate=16000)
+            self.microphone_error = None
+            if self.record_button is not None:
+                self.record_button.configure(state="normal", text="Start Transcribing")
+            return True
+        except (AttributeError, OSError) as exc:
+            self.microphone_error = str(exc)
+            self.source = None
+            if self.record_button is not None:
+                self.record_button.configure(state="disabled", text="Microphone Unavailable")
+
+            if show_alert:
+                CTkAlert(
+                    parent=self.master,
+                    status="error",
+                    title="Microphone Unavailable",
+                    msg="Install PyAudio to enable live transcription."
+                )
+            return False
 
     def update_text(self):
         text_to_display = ' '.join(self.transcription)

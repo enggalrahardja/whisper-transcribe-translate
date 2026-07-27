@@ -15,6 +15,8 @@ from .ctkdropdown import CTkScrollableDropdownFrame
 from .icons import icons
 from .style import FONTS, DROPDOWN
 from ..logic import Transcriber
+from ..logic.settings import SettingsHandler
+from ..logic.gpu_details import GPUInfo
 
 
 class CTk(ctk.CTkFrame, TkinterDnD.DnDWrapper):
@@ -48,6 +50,8 @@ class TranscribeUI(CTk):
         self.loader = None
         self.option_menu = None
         self.queue = queue.Queue()
+        self.progress_label = None
+        self.log_textbox = None
 
         self.default_widget()
 
@@ -81,11 +85,26 @@ class TranscribeUI(CTk):
     def task_widget(self):
         file_name, duration, file_size = self.get_audio_info(self.audio_path)
 
+        # Get model and hardware info
+        settings_handler = SettingsHandler()
+        settings = settings_handler.load_settings()
+        model_size = settings.get("model_size", "base").upper()
+        device = settings.get("device", "cpu").upper()
+
+        gpu_info = GPUInfo()
+        hw_info = gpu_info.get_gpu_info()
+
+        if device == "GPU" and hw_info["cuda_available"]:
+            device_name = hw_info["gpu_name"]
+            device_display = f"GPU ({device_name})"
+        else:
+            device_display = "CPU"
+
         label = ctk.CTkLabel(self.main_frame, text="Selected File", font=FONTS["subtitle_bold"])
         label.grid(row=0, column=0, padx=0, pady=(20, 5), sticky="w")
 
         frame = ctk.CTkFrame(self.main_frame)
-        frame.grid(row=1, column=0, padx=0, pady=20, sticky="nsew")
+        frame.grid(row=1, column=0, padx=0, pady=10, sticky="nsew")
         frame.grid_columnconfigure(0, weight=1)
 
         label_1 = ctk.CTkLabel(frame, text="File Name", font=FONTS["normal"])
@@ -103,26 +122,49 @@ class TranscribeUI(CTk):
         label_3_value = ctk.CTkLabel(frame, text=f"{file_size:.2f} MB", font=FONTS["small"])
         label_3_value.grid(row=2, column=1, padx=20, pady=(5, 20), sticky="e")
 
+        # Model and Hardware Info Section
+        info_label = ctk.CTkLabel(self.main_frame, text="Model & Hardware Info", font=FONTS["subtitle_bold"])
+        info_label.grid(row=2, column=0, padx=0, pady=(10, 5), sticky="w")
+
+        info_frame = ctk.CTkFrame(self.main_frame, fg_color=("#D3D5DB", "#2B2D30"))
+        info_frame.grid(row=3, column=0, padx=0, pady=10, sticky="nsew")
+        info_frame.grid_columnconfigure(0, weight=1)
+
+        model_label = ctk.CTkLabel(info_frame, text="Model", font=FONTS["normal"])
+        model_label.grid(row=0, column=0, padx=20, pady=(15, 5), sticky="w")
+        model_value = ctk.CTkLabel(info_frame, text=model_size, font=FONTS["small"], text_color=("#1E88E5", "#64B5F6"))
+        model_value.grid(row=0, column=1, padx=20, pady=(15, 5), sticky="e")
+
+        device_label = ctk.CTkLabel(info_frame, text="Device", font=FONTS["normal"])
+        device_label.grid(row=1, column=0, padx=20, pady=(5, 15), sticky="w")
+        device_value = ctk.CTkLabel(info_frame, text=device_display, font=FONTS["small"], text_color=("#1E88E5", "#64B5F6"))
+        device_value.grid(row=1, column=1, padx=20, pady=(5, 15), sticky="e")
+
         start_btn = ctk.CTkButton(self.main_frame, text="Start Transcribing", height=40, command=self.start_callback,
                                   font=FONTS["normal"])
-        start_btn.grid(row=2, column=0, padx=200, pady=20, sticky="nsew")
+        start_btn.grid(row=4, column=0, padx=200, pady=20, sticky="nsew")
 
     def result_widget(self):
         result = self.queue.get()
         text = str(result["text"]).strip()
 
+        # Clear all previous widgets
+        widgets = self.main_frame.winfo_children()
+        for widget in widgets:
+            widget.destroy()
+
         result_label = ctk.CTkLabel(self.main_frame, text="Transcribed Text", font=FONTS["subtitle_bold"])
-        result_label.grid(row=0, column=0, padx=10, pady=(20, 5), sticky="w")
+        result_label.grid(row=0, column=0, padx=10, pady=(20, 10), sticky="w")
 
         textbox = ctk.CTkTextbox(self.main_frame, width=580, height=200, border_width=2, font=FONTS["normal"])
-        textbox.grid(row=1, column=0, padx=10, pady=(5, 20), sticky="nsew", columnspan=2)
+        textbox.grid(row=1, column=0, padx=10, pady=(0, 20), sticky="nsew")
         textbox.insert("0.0", text=text)
 
         download_label = ctk.CTkLabel(self.main_frame, text="Download Text and Subtitles", font=FONTS["subtitle_bold"])
-        download_label.grid(row=2, column=0, padx=10, pady=(20, 5), sticky="w")
+        download_label.grid(row=2, column=0, padx=10, pady=(10, 10), sticky="w")
 
-        self.option_menu = ctk.CTkOptionMenu(self.main_frame, width=200)
-        self.option_menu.grid(row=3, column=0, padx=10, pady=(5, 20), sticky="w")
+        self.option_menu = ctk.CTkOptionMenu(self.main_frame, width=200, height=35)
+        self.option_menu.grid(row=3, column=0, padx=10, pady=(0, 10), sticky="w")
         format_values = ["Text File (txt)",
                          "Subtitles (SRT)",
                          "WebVTT (VTT)",
@@ -133,8 +175,8 @@ class TranscribeUI(CTk):
         self.option_menu.set(format_values[0])
 
         download_btn = ctk.CTkButton(self.main_frame, text="Download", command=lambda: self.save_text(result),
-                                     font=FONTS["normal"], height=35)
-        download_btn.grid(row=4, column=0, padx=10, pady=20, sticky="nsw")
+                                     font=FONTS["normal"], height=40, width=150)
+        download_btn.grid(row=4, column=0, padx=10, pady=(0, 20), sticky="w")
 
     def save_text(self, result):
         file_name = os.path.basename(self.audio_path)
@@ -195,19 +237,63 @@ class TranscribeUI(CTk):
         for widget in widgets:
             widget.destroy()
 
-        self.loader = CTkLoader(parent=self.master, title="Transcribing...", msg="Please wait...",
-                                cancel_func=self.set_signal)
+        # Create progress UI
+        progress_label = ctk.CTkLabel(self.main_frame, text="Transcription Progress", font=FONTS["subtitle_bold"])
+        progress_label.grid(row=0, column=0, padx=0, pady=(20, 10), sticky="w")
+
+        self.progress_label = ctk.CTkLabel(self.main_frame, text="Initializing... 0%", font=FONTS["normal"])
+        self.progress_label.grid(row=1, column=0, padx=0, pady=(0, 10), sticky="w")
+
+        # Progress bar - changed to determinate mode
+        self.progress_bar = ctk.CTkProgressBar(self.main_frame, width=580, mode="determinate")
+        self.progress_bar.grid(row=2, column=0, padx=0, pady=(0, 20), sticky="ew")
+        self.progress_bar.set(0)
+
+        # Log textbox
+        log_label = ctk.CTkLabel(self.main_frame, text="Process Log", font=FONTS["subtitle_bold"])
+        log_label.grid(row=3, column=0, padx=0, pady=(10, 10), sticky="w")
+
+        self.log_textbox = ctk.CTkTextbox(self.main_frame, width=580, height=200, font=FONTS["small"], border_width=2)
+        self.log_textbox.grid(row=4, column=0, padx=0, pady=(0, 20), sticky="nsew")
+        self.log_textbox.configure(state="disabled")
+
+        cancel_btn = ctk.CTkButton(self.main_frame, text="Cancel", height=40, width=150, command=self.set_signal,
+                                   font=FONTS["normal"], fg_color="#E53935", hover_color="#C62828")
+        cancel_btn.grid(row=5, column=0, padx=0, pady=(0, 20), sticky="w")
+
+        self.add_log("Starting transcription process...")
         thread = threading.Thread(target=self.start_transcribing, args=(self.audio_path, self.check_signal))
         thread.start()
 
     def start_transcribing(self, audio_path, check_signal):
-        transcriber = Transcriber(audio=audio_path)
-        result = transcriber.audio_recognition(cancel_func=check_signal)
-        self.loader.hide_loader()
-        if result:
-            self.queue.put(result)
+        try:
+            self.update_progress("Loading model...", 0)
+            self.add_log("Loading Whisper model...")
+
+            transcriber = Transcriber(audio=audio_path)
+
+            self.update_progress("Model loaded. Processing audio...", 5)
+            self.add_log(f"Model loaded successfully")
+            self.add_log(f"Processing audio file: {os.path.basename(audio_path)}")
+
+            result = transcriber.audio_recognition(cancel_func=check_signal, progress_callback=self.on_progress)
+
+            if result:
+                self.update_progress("Transcription completed!", 100)
+                self.add_log("Transcription completed successfully")
+                self.queue.put(result)
+                self.close_btn.configure(state="normal")
+                self.after(1000, self.result_widget)
+            else:
+                self.add_log("Transcription cancelled by user")
+                self.close_btn.configure(state="normal")
+                self.after(1000, self.default_widget)
+        except Exception as e:
+            self.add_log(f"Error: {str(e)}")
+            self.update_progress("Error occurred", 0)
+            CTkAlert(parent=self.master, status="error", title="Error", msg=f"Transcription failed: {str(e)}")
             self.close_btn.configure(state="normal")
-            self.result_widget()
+            self.after(1000, self.default_widget)
 
     def set_signal(self):
         self.cancel_signal = True
@@ -217,10 +303,36 @@ class TranscribeUI(CTk):
 
         if self.cancel_signal:
             self.cancel_signal = False
+            self.add_log("Cancelling transcription...")
             self.close_btn.configure(state="normal")
             self.after(1000, self.default_widget)
 
         return original_value
+
+    def on_progress(self, percentage):
+        """Callback function to update progress from transcriber"""
+        self.update_progress(f"Processing audio... {percentage}%", percentage)
+        if percentage % 10 == 0:  # Log every 10%
+            self.add_log(f"Progress: {percentage}% completed")
+
+    def update_progress(self, message, percentage=None):
+        """Update progress label and bar with current status"""
+        if self.progress_label:
+            if percentage is not None:
+                self.progress_label.configure(text=f"{message}")
+                if self.progress_bar:
+                    self.progress_bar.set(percentage / 100.0)
+            else:
+                self.progress_label.configure(text=message)
+
+    def add_log(self, message):
+        """Add a log entry to the log textbox"""
+        if self.log_textbox:
+            timestamp = time.strftime("%H:%M:%S")
+            self.log_textbox.configure(state="normal")
+            self.log_textbox.insert("end", f"[{timestamp}] {message}\n")
+            self.log_textbox.see("end")
+            self.log_textbox.configure(state="disabled")
 
     def select_file_callback(self):
         file_path = fd.askopenfilename(

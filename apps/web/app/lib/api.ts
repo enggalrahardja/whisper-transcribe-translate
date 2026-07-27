@@ -1,6 +1,37 @@
 export const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000";
 
 export type JobStatus = "queued" | "processing" | "completed" | "failed" | "cancelled";
+export type WhisperModelName = "tiny" | "base" | "small" | "medium" | "large";
+export type WhisperModelStatus = "not_downloaded" | "downloading" | "available" | "failed" | "corrupted" | "deleting";
+
+export type WhisperModelRegistry = {
+  model: WhisperModelName;
+  status: WhisperModelStatus;
+  file_name: string;
+  file_path: string;
+  expected_size_bytes: number | null;
+  actual_size_bytes: number | null;
+  checksum_valid: boolean | null;
+  downloaded_at: string | null;
+  last_verified_at: string | null;
+  last_error: string | null;
+  downloaded_bytes: number;
+  progress: number;
+  download_started_at: string | null;
+  download_completed_at: string | null;
+  download_heartbeat_at: string | null;
+  download_worker_id: string | null;
+  cancel_requested: boolean;
+  attempt: number;
+};
+
+export type AvailableWhisperModel = {
+  model: WhisperModelName;
+  file_name: string;
+  file_path: string;
+  actual_size_bytes: number;
+  last_verified_at: string | null;
+};
 
 export type Job = {
   id: string;
@@ -12,6 +43,8 @@ export type Job = {
   target_language: string | null;
   status: JobStatus;
   progress: number;
+  progress_stage: string | null;
+  progress_message: string | null;
   file_size: number | null;
   content_type: string | null;
   error: string | null;
@@ -116,7 +149,7 @@ export type ApplicationSettings = {
   restart_required_fields: string[];
   general: {
     default_language: string;
-    default_whisper_model: "tiny" | "base" | "small" | "medium" | "large";
+    default_whisper_model: WhisperModelName;
     default_task: "transcribe" | "translate";
     timezone: string;
     theme_preference: "system" | "light" | "dark";
@@ -143,7 +176,7 @@ export type ApplicationSettings = {
     reconnect_attempts: number;
     reconnect_delay_seconds: number;
     auto_stop_idle_seconds: number;
-    default_live_model: "tiny" | "base" | "small" | "medium" | "large";
+    default_live_model: WhisperModelName;
   };
   storage_retention: {
     upload_max_size_mb: number;
@@ -193,6 +226,115 @@ export type CleanupResult = {
   protected_project_files: number;
   errors: string[];
 };
+
+async function modelRegistryRequest(
+  path: string,
+  init?: RequestInit,
+): Promise<WhisperModelRegistry[]> {
+  const response = await fetch(`${apiBaseUrl}${path}`, { cache: "no-store", ...init });
+  if (!response.ok) {
+    let message = "Whisper model request failed";
+    try {
+      const body = await response.json() as { detail?: string | Array<{ msg?: string }> };
+      if (typeof body.detail === "string") message = body.detail;
+      if (Array.isArray(body.detail)) {
+        message = body.detail.map((item) => item.msg).filter(Boolean).join("; ") || message;
+      }
+    } catch {
+      // Keep the generic message when the response is not JSON.
+    }
+    throw new Error(message);
+  }
+  return await response.json() as WhisperModelRegistry[];
+}
+
+export function getWhisperModels(signal?: AbortSignal): Promise<WhisperModelRegistry[]> {
+  return modelRegistryRequest("/api/settings/models", { signal });
+}
+
+export async function getAvailableWhisperModels(signal?: AbortSignal): Promise<AvailableWhisperModel[]> {
+  const response = await fetch(`${apiBaseUrl}/api/settings/models/available`, {
+    cache: "no-store",
+    signal,
+  });
+  if (!response.ok) {
+    throw new Error("Available Whisper models could not be loaded");
+  }
+  return await response.json() as AvailableWhisperModel[];
+}
+
+export function scanWhisperModels(): Promise<WhisperModelRegistry[]> {
+  return modelRegistryRequest("/api/settings/models/scan", { method: "POST" });
+}
+
+export async function verifyWhisperModel(model: WhisperModelName): Promise<WhisperModelRegistry> {
+  const response = await fetch(`${apiBaseUrl}/api/settings/models/${model}/verify`, {
+    method: "POST",
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    let message = `Whisper model ${model} could not be verified`;
+    try {
+      const body = await response.json() as { detail?: string };
+      if (body.detail) message = body.detail;
+    } catch {
+      // Keep the fallback message.
+    }
+    throw new Error(message);
+  }
+  return await response.json() as WhisperModelRegistry;
+}
+
+export async function deleteWhisperModel(model: WhisperModelName): Promise<WhisperModelRegistry> {
+  const response = await fetch(`${apiBaseUrl}/api/settings/models/${model}`, {
+    method: "DELETE",
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    let message = `Whisper model ${model} could not be deleted`;
+    try {
+      const body = await response.json() as { detail?: string };
+      if (body.detail) message = body.detail;
+    } catch {
+      // Keep the fallback message.
+    }
+    throw new Error(message);
+  }
+  return await response.json() as WhisperModelRegistry;
+}
+
+async function whisperModelAction(
+  model: WhisperModelName,
+  action: "download" | "cancel" | "retry",
+): Promise<WhisperModelRegistry> {
+  const response = await fetch(`${apiBaseUrl}/api/settings/models/${model}/${action}`, {
+    method: "POST",
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    let message = `Whisper model ${action} request failed`;
+    try {
+      const body = await response.json() as { detail?: string };
+      if (body.detail) message = body.detail;
+    } catch {
+      // Keep the fallback message.
+    }
+    throw new Error(message);
+  }
+  return await response.json() as WhisperModelRegistry;
+}
+
+export function downloadWhisperModel(model: WhisperModelName): Promise<WhisperModelRegistry> {
+  return whisperModelAction(model, "download");
+}
+
+export function cancelWhisperModelDownload(model: WhisperModelName): Promise<WhisperModelRegistry> {
+  return whisperModelAction(model, "cancel");
+}
+
+export function retryWhisperModelDownload(model: WhisperModelName): Promise<WhisperModelRegistry> {
+  return whisperModelAction(model, "retry");
+}
 
 export function websocketBaseUrl(): string {
   return apiBaseUrl.replace(/^http:/, "ws:").replace(/^https:/, "wss:");

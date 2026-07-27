@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { apiBaseUrl, ApplicationSettings, LiveSession, websocketBaseUrl } from "../lib/api";
+import { apiBaseUrl, ApplicationSettings, AvailableWhisperModel, getAvailableWhisperModels, LiveSession, websocketBaseUrl } from "../lib/api";
 import { languageLabel, sourceLanguages } from "../lib/languages";
 
 type UiStatus = "idle" | "requesting" | "active" | "paused" | "stopping" | "completed" | "failed";
@@ -72,7 +72,10 @@ async function responseError(response: Response, fallback: string): Promise<stri
 
 export default function LivePage() {
   const [language, setLanguage] = useState("auto");
-  const [model, setModel] = useState("base");
+  const [model, setModel] = useState("");
+  const [availableModels, setAvailableModels] = useState<AvailableWhisperModel[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(true);
+  const [modelsError, setModelsError] = useState("");
   const [uiStatus, setUiStatus] = useState<UiStatus>("idle");
   const [connection, setConnection] = useState<ConnectionStatus>("disconnected");
   const [microphone, setMicrophone] = useState("Idle");
@@ -236,6 +239,10 @@ export default function LivePage() {
   }, [flushAudio]);
 
   async function start() {
+    if (modelsLoading || !model || !availableModels.some((item) => item.model === model)) {
+      setError("Select an available Whisper model before starting live transcription.");
+      return;
+    }
     if (!navigator.mediaDevices?.getUserMedia) {
       setError("This browser does not support microphone capture.");
       return;
@@ -246,7 +253,7 @@ export default function LivePage() {
       return;
     }
     setUiStatus("requesting");
-    setMicrophone("Requesting permission");
+    setMicrophone("Waiting for model validation");
     setError("");
     intentionalCloseRef.current = false;
     reconnectAttemptsRef.current = 0;
@@ -261,25 +268,30 @@ export default function LivePage() {
     setFinalText("");
     setSegments([]);
 
+    let created: LiveSession | null = null;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
-        video: false,
-      });
-      streamRef.current = stream;
       const response = await fetch(`${apiBaseUrl}/api/live/sessions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ language, model }),
       });
       if (!response.ok) throw new Error(await responseError(response, "Live session could not be created"));
-      const created = await response.json() as LiveSession;
+      created = await response.json() as LiveSession;
+      setMicrophone("Requesting permission");
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+        video: false,
+      });
+      streamRef.current = stream;
       sessionIdRef.current = created.session_id;
       sessionActiveRef.current = true;
       applySession(created);
       setupAudio(stream);
       connectSocket(created.session_id);
     } catch (startError) {
+      if (created) {
+        void fetch(`${apiBaseUrl}/api/live/sessions/${created.session_id}/stop`, { method: "POST" });
+      }
       stopAudio();
       sessionActiveRef.current = false;
       setUiStatus("idle");
@@ -340,14 +352,35 @@ export default function LivePage() {
 
   useEffect(() => {
     const controller = new AbortController();
-    fetch(`${apiBaseUrl}/api/settings`, { cache: "no-store", signal: controller.signal })
-      .then((response) => response.ok ? response.json() : null)
-      .then((settings: ApplicationSettings | null) => {
-        if (!settings) return;
+    const refreshModels = () => void getAvailableWhisperModels(controller.signal).then((models) => {
+      setAvailableModels(models);
+      setModel((current) => models.some((item) => item.model === current) ? current : "");
+    }).catch(() => undefined);
+    window.addEventListener("focus", refreshModels);
+    return () => {
+      controller.abort();
+      window.removeEventListener("focus", refreshModels);
+    };
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    Promise.all([
+      fetch(`${apiBaseUrl}/api/settings`, { cache: "no-store", signal: controller.signal }),
+      getAvailableWhisperModels(controller.signal),
+    ]).then(async ([settingsResponse, models]) => {
+        if (!settingsResponse.ok) throw new Error("Settings could not be loaded");
+        const settings = await settingsResponse.json() as ApplicationSettings;
+        setAvailableModels(models);
         liveSettingsRef.current = settings.live_transcription;
         setLanguage(settings.general.default_language);
-        setModel(settings.live_transcription.default_live_model);
-      }).catch(() => undefined);
+        setModel(models.some(({ model }) => model === settings.live_transcription.default_live_model)
+          ? settings.live_transcription.default_live_model
+          : "");
+      }).catch((loadError) => {
+        if (loadError instanceof DOMException && loadError.name === "AbortError") return;
+        setModelsError(loadError instanceof Error ? loadError.message : "Available Whisper models could not be loaded");
+      }).finally(() => setModelsLoading(false));
     return () => controller.abort();
   }, []);
 
@@ -373,7 +406,9 @@ export default function LivePage() {
     stopAudio();
   }, [stopAudio]);
 
-  const canStart = ["idle", "completed", "failed"].includes(uiStatus);
+  const canConfigure = ["idle", "completed", "failed"].includes(uiStatus);
+  const canStart = canConfigure && !modelsLoading && Boolean(model)
+    && availableModels.some((item) => item.model === model);
   return (
     <section className="live-page">
       <header className="live-header">
@@ -383,9 +418,11 @@ export default function LivePage() {
 
       <section className="live-control-card">
         <div className="live-options">
-          <label>Language<select disabled={!canStart} onChange={(event) => setLanguage(event.target.value)} value={language}>{sourceLanguages.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
-          <label>Whisper model<select disabled={!canStart} onChange={(event) => setModel(event.target.value)} value={model}><option value="tiny">Tiny</option><option value="base">Base</option><option value="small">Small</option><option value="medium">Medium</option><option value="large">Large</option></select></label>
+          <label>Language<select disabled={!canConfigure} onChange={(event) => setLanguage(event.target.value)} value={language}>{sourceLanguages.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+          <label>Whisper model<select disabled={!canConfigure || modelsLoading || availableModels.length === 0} onChange={(event) => setModel(event.target.value)} value={model}><option disabled value="">{modelsLoading ? "Loading models…" : "Select an available model"}</option>{availableModels.map(({ model: availableModel }) => <option key={availableModel} value={availableModel}>{availableModel}</option>)}</select></label>
         </div>
+        {!modelsLoading && availableModels.length === 0 ? <p className="error-callout" role="alert">No Whisper model is available. <Link href="/settings#whisper-models">Open Settings → Whisper Models</Link> to download one.</p> : null}
+        {modelsError ? <p className="error-callout" role="alert">{modelsError} <Link href="/settings#whisper-models">Open model settings</Link>.</p> : null}
         <div className="live-status-grid">
           <div><span>Microphone</span><strong>{microphone}</strong></div>
           <div><span>Connection</span><strong>{connection}</strong></div>

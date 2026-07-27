@@ -1,12 +1,22 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   apiBaseUrl,
   ApplicationSettings,
+  cancelWhisperModelDownload,
   CleanupResult,
+  deleteWhisperModel,
+  downloadWhisperModel,
   formatBytes,
+  getWhisperModels,
+  retryWhisperModelDownload,
+  scanWhisperModels,
   SettingsRuntime,
+  verifyWhisperModel,
+  WhisperModelName,
+  WhisperModelRegistry,
+  WhisperModelStatus,
 } from "../lib/api";
 import { sourceLanguages, targetLanguages } from "../lib/languages";
 import { applyThemePreference } from "../components/runtime-preferences";
@@ -14,7 +24,14 @@ import { applyThemePreference } from "../components/runtime-preferences";
 type Feedback = { type: "success" | "error"; message: string } | null;
 type SettingsSection = "general" | "transcription" | "translation" | "live_transcription" | "storage_retention" | "worker_processing";
 
-const models = ["tiny", "base", "small", "medium", "large"] as const;
+const modelStatusLabels: Record<WhisperModelStatus, string> = {
+  not_downloaded: "Not downloaded",
+  downloading: "Downloading",
+  available: "Available",
+  failed: "Failed",
+  corrupted: "Corrupted",
+  deleting: "Deleting",
+};
 
 function cloneSettings(settings: ApplicationSettings): ApplicationSettings {
   return structuredClone(settings);
@@ -42,10 +59,25 @@ export default function SettingsPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [cleaning, setCleaning] = useState(false);
+  const [whisperModels, setWhisperModels] = useState<WhisperModelRegistry[] | null>(null);
+  const [modelAction, setModelAction] = useState<string | null>(null);
+  const [modelFeedback, setModelFeedback] = useState<Feedback>(null);
   const [feedback, setFeedback] = useState<Feedback>(null);
   const [cleanupResult, setCleanupResult] = useState<CleanupResult | null>(null);
+  const modelRefreshInFlight = useRef<Promise<void> | null>(null);
+  const mounted = useRef(true);
 
   const dirty = useMemo(() => Boolean(saved && draft && JSON.stringify(saved) !== JSON.stringify(draft)), [draft, saved]);
+  const availableModels = useMemo(
+    () => whisperModels?.filter((model) => model.status === "available") ?? [],
+    [whisperModels],
+  );
+  const defaultModelAvailable = Boolean(
+    draft && availableModels.some((model) => model.model === draft.general.default_whisper_model),
+  );
+  const defaultLiveModelAvailable = Boolean(
+    draft && availableModels.some((model) => model.model === draft.live_transcription.default_live_model),
+  );
 
   const loadRuntime = useCallback(async (signal?: AbortSignal) => {
     try {
@@ -63,13 +95,15 @@ export default function SettingsPage() {
     Promise.all([
       fetch(`${apiBaseUrl}/api/settings`, { cache: "no-store", signal: controller.signal }),
       fetch(`${apiBaseUrl}/api/settings/runtime`, { cache: "no-store", signal: controller.signal }),
-    ]).then(async ([settingsResponse, runtimeResponse]) => {
+      getWhisperModels(controller.signal),
+    ]).then(async ([settingsResponse, runtimeResponse, loadedModels]) => {
       if (!settingsResponse.ok) throw new Error(await responseError(settingsResponse, "Settings could not be loaded"));
       if (!runtimeResponse.ok) throw new Error(await responseError(runtimeResponse, "Runtime status could not be loaded"));
       const loaded = await settingsResponse.json() as ApplicationSettings;
       setSaved(loaded);
       setDraft(cloneSettings(loaded));
       setRuntime(await runtimeResponse.json());
+      setWhisperModels(loadedModels);
     }).catch((error) => {
       if (error instanceof DOMException && error.name === "AbortError") return;
       setFeedback({ type: "error", message: error instanceof Error ? error.message : "Settings could not be loaded" });
@@ -78,9 +112,27 @@ export default function SettingsPage() {
   }, []);
 
   useEffect(() => {
-    const timer = window.setInterval(() => void loadRuntime(), 3000);
-    return () => window.clearInterval(timer);
+    const controller = new AbortController();
+    let timer: number | undefined;
+    let stopped = false;
+    const poll = async () => {
+      await loadRuntime(controller.signal);
+      if (!stopped) timer = window.setTimeout(poll, 3000);
+    };
+    timer = window.setTimeout(poll, 3000);
+    return () => {
+      stopped = true;
+      controller.abort();
+      if (timer) window.clearTimeout(timer);
+    };
   }, [loadRuntime]);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
 
   function update(section: SettingsSection, field: string, value: string | number | boolean | string[]) {
     setDraft((current) => current ? ({
@@ -92,6 +144,13 @@ export default function SettingsPage() {
 
   async function save() {
     if (!draft || !dirty) return;
+    if (!defaultModelAvailable || !defaultLiveModelAvailable) {
+      setFeedback({
+        type: "error",
+        message: "Select available default Whisper models for General and Live before saving settings.",
+      });
+      return;
+    }
     setSaving(true);
     setFeedback(null);
     try {
@@ -148,10 +207,148 @@ export default function SettingsPage() {
     }
   }
 
+  const refreshWhisperModels = useCallback((signal?: AbortSignal): Promise<void> => {
+    if (modelRefreshInFlight.current) return modelRefreshInFlight.current;
+    const request = getWhisperModels(signal).then((models) => {
+      if (mounted.current) setWhisperModels(models);
+    });
+    modelRefreshInFlight.current = request;
+    void request.then(
+      () => {
+        if (modelRefreshInFlight.current === request) modelRefreshInFlight.current = null;
+      },
+      () => {
+        if (modelRefreshInFlight.current === request) modelRefreshInFlight.current = null;
+      },
+    );
+    return request;
+  }, []);
+
+  useEffect(() => {
+    const active = whisperModels?.some(
+      (model) => model.status === "downloading" || model.status === "deleting",
+    );
+    if (!active) return;
+    const controller = new AbortController();
+    let timer: number | undefined;
+    let stopped = false;
+    const poll = async () => {
+      try {
+        await refreshWhisperModels(controller.signal);
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        setModelFeedback({
+          type: "error",
+          message: error instanceof Error ? error.message : "Model progress could not be refreshed",
+        });
+      } finally {
+        if (!stopped) timer = window.setTimeout(poll, 1500);
+      }
+    };
+    timer = window.setTimeout(poll, 1500);
+    return () => {
+      stopped = true;
+      controller.abort();
+      if (timer) window.clearTimeout(timer);
+    };
+  }, [refreshWhisperModels, whisperModels]);
+
+  async function scanModels() {
+    setModelAction("scan");
+    setModelFeedback(null);
+    try {
+      await scanWhisperModels();
+      await refreshWhisperModels();
+      setModelFeedback({ type: "success", message: "Whisper model scan completed." });
+    } catch (error) {
+      setModelFeedback({ type: "error", message: error instanceof Error ? error.message : "Whisper models could not be scanned" });
+    } finally {
+      setModelAction(null);
+    }
+  }
+
+  async function verifyModel(model: WhisperModelName) {
+    setModelAction(`verify:${model}`);
+    setModelFeedback(null);
+    try {
+      const verified = await verifyWhisperModel(model);
+      await refreshWhisperModels();
+      setModelFeedback({
+        type: verified.status === "available" ? "success" : "error",
+        message: `${model} verification finished with status ${modelStatusLabels[verified.status]}.`,
+      });
+    } catch (error) {
+      setModelFeedback({ type: "error", message: error instanceof Error ? error.message : `${model} could not be verified` });
+    } finally {
+      setModelAction(null);
+    }
+  }
+
+  async function removeModel(model: WhisperModelName) {
+    if (!window.confirm(`Delete the local ${model} Whisper model file? This cannot be undone.`)) return;
+    setModelAction(`delete:${model}`);
+    setModelFeedback(null);
+    try {
+      await deleteWhisperModel(model);
+      await refreshWhisperModels();
+      setModelFeedback({ type: "success", message: `Local model ${model} was deleted.` });
+    } catch (error) {
+      setModelFeedback({ type: "error", message: error instanceof Error ? error.message : `${model} could not be deleted` });
+    } finally {
+      setModelAction(null);
+    }
+  }
+
+  async function requestDownload(model: WhisperModelName) {
+    setModelAction(`download:${model}`);
+    setModelFeedback(null);
+    try {
+      await downloadWhisperModel(model);
+      await refreshWhisperModels();
+      setModelFeedback({ type: "success", message: `${model} download was queued.` });
+    } catch (error) {
+      setModelFeedback({ type: "error", message: error instanceof Error ? error.message : `${model} could not be queued` });
+    } finally {
+      setModelAction(null);
+    }
+  }
+
+  async function cancelDownload(model: WhisperModelName) {
+    setModelAction(`cancel:${model}`);
+    setModelFeedback(null);
+    try {
+      await cancelWhisperModelDownload(model);
+      await refreshWhisperModels();
+      setModelFeedback({ type: "success", message: `Cancellation requested for ${model}.` });
+    } catch (error) {
+      setModelFeedback({ type: "error", message: error instanceof Error ? error.message : `${model} could not be cancelled` });
+    } finally {
+      setModelAction(null);
+    }
+  }
+
+  async function retryDownload(model: WhisperModelName) {
+    setModelAction(`retry:${model}`);
+    setModelFeedback(null);
+    try {
+      await retryWhisperModelDownload(model);
+      await refreshWhisperModels();
+      setModelFeedback({ type: "success", message: `${model} download retry was queued.` });
+    } catch (error) {
+      setModelFeedback({ type: "error", message: error instanceof Error ? error.message : `${model} retry could not be queued` });
+    } finally {
+      setModelAction(null);
+    }
+  }
+
   if (loading) return <section className="settings-page"><div className="settings-card"><p className="eyebrow">SETTINGS</p><h1>Loading configuration…</h1></div></section>;
   if (!draft) return <section className="settings-page"><div className="settings-card"><p className="eyebrow">SETTINGS</p><h1>Unable to load settings</h1>{feedback ? <p className="settings-feedback error">{feedback.message}</p> : null}</div></section>;
 
   const disabled = saving || cleaning;
+  const hasActiveModelOperation = Boolean(
+    whisperModels?.some((model) => model.status === "downloading" || model.status === "deleting"),
+  );
+  const modelActionsDisabled = disabled || modelAction !== null;
   return (
     <section className="settings-page">
       <header className="settings-header">
@@ -160,7 +357,7 @@ export default function SettingsPage() {
       </header>
 
       <div className="settings-toolbar">
-        <button disabled={!dirty || disabled} onClick={save} type="button">{saving ? "Saving…" : "Save settings"}</button>
+        <button disabled={!dirty || disabled || !defaultModelAvailable || !defaultLiveModelAvailable} onClick={save} type="button">{saving ? "Saving…" : "Save settings"}</button>
         <button className="secondary" disabled={!dirty || disabled} onClick={reset} type="button">Reset unsaved changes</button>
         <span>Fields marked <strong>Restart required</strong> take effect after restarting the worker/API runtime.</span>
       </div>
@@ -171,11 +368,51 @@ export default function SettingsPage() {
           <div className="settings-section-heading"><div><p className="eyebrow">GENERAL</p><h2>Workspace defaults</h2></div></div>
           <div className="settings-grid">
             <label>Default language<select disabled={disabled} value={draft.general.default_language} onChange={(event) => update("general", "default_language", event.target.value)}>{sourceLanguages.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
-            <label>Default Whisper model<select disabled={disabled} value={draft.general.default_whisper_model} onChange={(event) => update("general", "default_whisper_model", event.target.value)}>{models.map((model) => <option key={model} value={model}>{model}</option>)}</select></label>
+            <label>Default Whisper model<select disabled={disabled} value={defaultModelAvailable ? draft.general.default_whisper_model : ""} onChange={(event) => update("general", "default_whisper_model", event.target.value)}><option disabled value="">Select an available model</option>{availableModels.map(({ model }) => <option key={model} value={model}>{model}</option>)}</select>{!defaultModelAvailable ? <small className="model-warning" role="alert">Current default “{draft.general.default_whisper_model}” is not available. Select an available model before saving.</small> : null}</label>
             <label>Default task<select disabled={disabled} value={draft.general.default_task} onChange={(event) => update("general", "default_task", event.target.value)}><option value="transcribe">Transcribe</option><option value="translate">Translate</option></select></label>
             <label>Timezone<input disabled={disabled} list="timezone-options" value={draft.general.timezone} onChange={(event) => update("general", "timezone", event.target.value)} /><datalist id="timezone-options"><option value="UTC" /><option value="Asia/Jakarta" /><option value="Asia/Makassar" /><option value="Asia/Jayapura" /><option value="Indian/Christmas" /></datalist></label>
             <label>Theme preference<select disabled={disabled} value={draft.general.theme_preference} onChange={(event) => update("general", "theme_preference", event.target.value)}><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
           </div>
+        </section>
+
+        <section className="settings-card whisper-models-section" id="whisper-models">
+          <div className="settings-section-heading">
+            <div><p className="eyebrow">LOCAL MODEL REGISTRY</p><h2>Whisper Models</h2><p className="section-description">Download, scan, verify, or remove local checkpoints managed in this storage directory.</p></div>
+            <button className="model-scan-button" disabled={modelActionsDisabled || hasActiveModelOperation} onClick={scanModels} type="button">{modelAction === "scan" ? "Scanning…" : "Scan Models"}</button>
+          </div>
+          {modelFeedback ? <p className={`settings-feedback ${modelFeedback.type}`} role="status">{modelFeedback.message}</p> : null}
+          {!whisperModels ? <p className="model-loading" role="status">Loading Whisper model registry…</p> : (
+            <div className="whisper-model-grid">
+              {whisperModels.map((model) => (
+                <article className={`whisper-model-card model-${model.status}`} key={model.model}>
+                  <header><div><h3>{model.model}</h3><span>{model.file_name}</span></div><span className={`model-status model-status-${model.status}`}>{modelStatusLabels[model.status]}</span></header>
+                  <dl className="model-metadata">
+                    <div><dt>Expected size</dt><dd>{formatBytes(model.expected_size_bytes)}</dd></div>
+                    <div><dt>Actual size</dt><dd>{formatBytes(model.actual_size_bytes)}</dd></div>
+                    <div><dt>Checksum</dt><dd>{model.checksum_valid === null ? "Not verified" : model.checksum_valid ? "Valid" : "Invalid"}</dd></div>
+                    <div><dt>Downloaded</dt><dd>{dateTime(model.downloaded_at)}</dd></div>
+                    <div><dt>Last verified</dt><dd>{dateTime(model.last_verified_at)}</dd></div>
+                    <div><dt>Download attempt</dt><dd>{model.attempt || "—"}</dd></div>
+                    <div><dt>Download completed</dt><dd>{dateTime(model.download_completed_at)}</dd></div>
+                    <div className="model-path"><dt>Storage path</dt><dd><code>{model.file_path}</code></dd></div>
+                    {model.last_error ? <div className="model-error"><dt>Last error</dt><dd>{model.last_error}</dd></div> : null}
+                  </dl>
+                  {model.status === "downloading" ? <div className="model-progress">
+                    <div><span>{model.cancel_requested ? "Cancelling…" : model.download_worker_id ? "Downloading…" : "Queued…"}</span><strong>{model.progress.toFixed(1)}%</strong></div>
+                    <progress max="100" value={model.progress}>{model.progress}%</progress>
+                    <small>{formatBytes(model.downloaded_bytes)} / {formatBytes(model.expected_size_bytes)}</small>
+                  </div> : null}
+                  <div className="model-actions">
+                    <button disabled={modelActionsDisabled || model.status !== "not_downloaded"} onClick={() => requestDownload(model.model)} type="button">{modelAction === `download:${model.model}` ? "Queuing…" : "Download"}</button>
+                    <button disabled={modelActionsDisabled || !["failed", "corrupted", "not_downloaded"].includes(model.status)} onClick={() => retryDownload(model.model)} type="button">{modelAction === `retry:${model.model}` ? "Queuing…" : "Retry"}</button>
+                    <button disabled={modelActionsDisabled || model.status !== "downloading" || model.cancel_requested} onClick={() => cancelDownload(model.model)} type="button">{modelAction === `cancel:${model.model}` ? "Cancelling…" : "Cancel"}</button>
+                    <button disabled={modelActionsDisabled || ["downloading", "deleting"].includes(model.status)} onClick={() => verifyModel(model.model)} type="button">{modelAction === `verify:${model.model}` ? "Verifying…" : "Verify"}</button>
+                    <button className="danger" disabled={modelActionsDisabled || ["downloading", "deleting"].includes(model.status)} onClick={() => removeModel(model.model)} type="button">{modelAction === `delete:${model.model}` ? "Deleting…" : "Delete"}</button>
+                  </div>
+                </article>
+              ))}
+            </div>
+          )}
         </section>
 
         <section className="settings-card">
@@ -210,7 +447,7 @@ export default function SettingsPage() {
             <label>Reconnect attempts<input disabled={disabled} min="0" max="20" type="number" value={draft.live_transcription.reconnect_attempts} onChange={(event) => update("live_transcription", "reconnect_attempts", Number(event.target.value))} /></label>
             <label>Reconnect delay (seconds)<input disabled={disabled} min="0.25" max="30" step="0.25" type="number" value={draft.live_transcription.reconnect_delay_seconds} onChange={(event) => update("live_transcription", "reconnect_delay_seconds", Number(event.target.value))} /></label>
             <label>Auto-stop idle duration (seconds)<input disabled={disabled} min="10" max="86400" type="number" value={draft.live_transcription.auto_stop_idle_seconds} onChange={(event) => update("live_transcription", "auto_stop_idle_seconds", Number(event.target.value))} /></label>
-            <label>Default live model<select disabled={disabled} value={draft.live_transcription.default_live_model} onChange={(event) => update("live_transcription", "default_live_model", event.target.value)}>{models.map((model) => <option key={model} value={model}>{model}</option>)}</select></label>
+            <label>Default live model<select disabled={disabled} value={defaultLiveModelAvailable ? draft.live_transcription.default_live_model : ""} onChange={(event) => update("live_transcription", "default_live_model", event.target.value)}><option disabled value="">Select an available model</option>{availableModels.map(({ model }) => <option key={model} value={model}>{model}</option>)}</select>{!defaultLiveModelAvailable ? <small className="model-warning" role="alert">Current live default “{draft.live_transcription.default_live_model}” is not available. Select an available model before saving.</small> : null}</label>
           </div>
         </section>
 

@@ -1,9 +1,17 @@
 import hashlib
 import io
 import os
+import threading
+import time
 import urllib
 import warnings
-from typing import List, Optional, Union
+from contextlib import contextmanager
+from typing import Callable, Iterator, List, Optional, Union
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - native Ubuntu uses fcntl
+    fcntl = None
 
 import torch
 from tqdm import tqdm
@@ -46,49 +54,136 @@ _ALIGNMENT_HEADS = {
     "large": b"ABzY8gWO1E0{>%R7(9S+Kn!D~%ngiGaR?*L!iJG9p-nab0JQ=-{D1-g00",
 }
 
+_download_thread_locks: dict[str, threading.Lock] = {}
+_download_thread_locks_guard = threading.Lock()
 
-def _download(url: str, root: str, in_memory: bool) -> Union[bytes, str]:
+
+def _sha256_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+@contextmanager
+def _model_download_lock(
+    target: str,
+    cancel_callback: Optional[Callable[[], bool]],
+) -> Iterator[None]:
+    lock_path = f"{target}.lock"
+    with _download_thread_locks_guard:
+        thread_lock = _download_thread_locks.setdefault(lock_path, threading.Lock())
+
+    while not thread_lock.acquire(timeout=0.2):
+        if cancel_callback and cancel_callback():
+            raise InterruptedError("Model download was interrupted while waiting for the model lock")
+
+    lock_file = None
+    try:
+        if fcntl is not None:
+            lock_file = open(lock_path, "a+b")
+            while True:
+                try:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    if cancel_callback and cancel_callback():
+                        raise InterruptedError("Model download was interrupted while waiting for the model lock")
+                    time.sleep(0.2)
+        yield
+    finally:
+        if lock_file is not None:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            lock_file.close()
+        thread_lock.release()
+
+
+def _download(
+    url: str,
+    root: str,
+    in_memory: bool,
+    progress_callback: Optional[Callable[[int], None]] = None,
+    download_start_callback: Optional[Callable[[], None]] = None,
+    cancel_callback: Optional[Callable[[], bool]] = None,
+) -> Union[bytes, str]:
     os.makedirs(root, exist_ok=True)
 
     expected_sha256 = url.split("/")[-2]
     download_target = os.path.join(root, os.path.basename(url))
+    temporary_target = f"{download_target}.download"
 
-    if os.path.exists(download_target) and not os.path.isfile(download_target):
-        raise RuntimeError(f"{download_target} exists and is not a regular file")
+    with _model_download_lock(download_target, cancel_callback):
+        if os.path.exists(download_target) and not os.path.isfile(download_target):
+            raise RuntimeError(f"{download_target} exists and is not a regular file")
 
-    if os.path.isfile(download_target):
-        with open(download_target, "rb") as f:
-            model_bytes = f.read()
-        if hashlib.sha256(model_bytes).hexdigest() == expected_sha256:
-            return model_bytes if in_memory else download_target
-        else:
+        if os.path.isfile(download_target):
+            if _sha256_file(download_target) == expected_sha256:
+                if in_memory:
+                    with open(download_target, "rb") as file:
+                        return file.read()
+                return download_target
             warnings.warn(
                 f"{download_target} exists, but the SHA256 checksum does not match; re-downloading the file"
             )
 
-    with urllib.request.urlopen(url) as source, open(download_target, "wb") as output:
-        with tqdm(
-            total=int(source.info().get("Content-Length")),
-            ncols=80,
-            unit="iB",
-            unit_scale=True,
-            unit_divisor=1024,
-        ) as loop:
-            while True:
-                buffer = source.read(8192)
-                if not buffer:
-                    break
+        if cancel_callback and cancel_callback():
+            raise InterruptedError("Model download was interrupted")
+        if download_start_callback:
+            download_start_callback()
+        if progress_callback:
+            progress_callback(0)
 
-                output.write(buffer)
-                loop.update(len(buffer))
+        try:
+            with urllib.request.urlopen(url) as source, open(temporary_target, "wb") as output:
+                content_length = source.info().get("Content-Length")
+                total = int(content_length) if content_length else None
+                downloaded = 0
+                last_cancel_check = 0.0
+                last_reported_percentage = 0
+                with tqdm(
+                    total=total,
+                    ncols=80,
+                    unit="iB",
+                    unit_scale=True,
+                    unit_divisor=1024,
+                ) as loop:
+                    while True:
+                        current_time = time.monotonic()
+                        if cancel_callback and current_time - last_cancel_check >= 0.25:
+                            last_cancel_check = current_time
+                            if cancel_callback():
+                                raise InterruptedError("Model download was interrupted")
+                        buffer = source.read(8192)
+                        if not buffer:
+                            break
+                        output.write(buffer)
+                        downloaded += len(buffer)
+                        loop.update(len(buffer))
+                        if progress_callback and total:
+                            percentage = min(100, int(downloaded * 100 / total))
+                            if percentage > last_reported_percentage:
+                                last_reported_percentage = percentage
+                                progress_callback(percentage)
 
-    model_bytes = open(download_target, "rb").read()
-    if hashlib.sha256(model_bytes).hexdigest() != expected_sha256:
-        raise RuntimeError(
-            "Model has been downloaded but the SHA256 checksum does not not match. Please retry loading the model."
-        )
+            if _sha256_file(temporary_target) != expected_sha256:
+                raise RuntimeError(
+                    "Model has been downloaded but the SHA256 checksum does not match. Please retry loading the model."
+                )
+            os.replace(temporary_target, download_target)
+            if progress_callback and last_reported_percentage < 100:
+                progress_callback(100)
+        except BaseException:
+            try:
+                os.remove(temporary_target)
+            except FileNotFoundError:
+                pass
+            raise
 
-    return model_bytes if in_memory else download_target
+        if in_memory:
+            with open(download_target, "rb") as file:
+                return file.read()
+        return download_target
 
 
 def available_models() -> List[str]:
@@ -101,6 +196,9 @@ def load_model(
     device: Optional[Union[str, torch.device]] = None,
     download_root: str = None,
     in_memory: bool = False,
+    download_progress_callback: Optional[Callable[[int], None]] = None,
+    download_start_callback: Optional[Callable[[], None]] = None,
+    cancel_callback: Optional[Callable[[], bool]] = None,
 ) -> Whisper:
     """
     Load a Whisper ASR model
@@ -130,7 +228,14 @@ def load_model(
         download_root = os.path.join(os.getenv("XDG_CACHE_HOME", default), "whisper")
 
     if name in _MODELS:
-        checkpoint_file = _download(_MODELS[name], download_root, in_memory)
+        checkpoint_file = _download(
+            _MODELS[name],
+            download_root,
+            in_memory,
+            progress_callback=download_progress_callback,
+            download_start_callback=download_start_callback,
+            cancel_callback=cancel_callback,
+        )
         alignment_heads = _ALIGNMENT_HEADS[name]
     elif os.path.isfile(name):
         checkpoint_file = open(name, "rb").read() if in_memory else name
@@ -139,6 +244,9 @@ def load_model(
         raise RuntimeError(
             f"Model {name} not found; available models = {available_models()}"
         )
+
+    if cancel_callback and cancel_callback():
+        raise InterruptedError("Model loading was interrupted")
 
     with (
         io.BytesIO(checkpoint_file) if in_memory else open(checkpoint_file, "rb")
@@ -149,6 +257,9 @@ def load_model(
     dims = ModelDimensions(**checkpoint["dims"])
     model = Whisper(dims)
     model.load_state_dict(checkpoint["model_state_dict"])
+
+    if cancel_callback and cancel_callback():
+        raise InterruptedError("Model loading was interrupted")
 
     if alignment_heads is not None:
         model.set_alignment_heads(alignment_heads)

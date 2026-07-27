@@ -1,8 +1,9 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { FormEvent, useEffect, useState } from "react";
-import { apiBaseUrl, ApplicationSettings, formatBytes } from "../lib/api";
+import { apiBaseUrl, ApplicationSettings, AvailableWhisperModel, formatBytes, getAvailableWhisperModels } from "../lib/api";
 import { languageLabel, sourceLanguages, targetLanguages } from "../lib/languages";
 
 export default function TranslatePage() {
@@ -10,21 +11,45 @@ export default function TranslatePage() {
   const [file, setFile] = useState<File | null>(null);
   const [sourceLanguage, setSourceLanguage] = useState("auto");
   const [targetLanguage, setTargetLanguage] = useState("english");
-  const [model, setModel] = useState("base");
+  const [model, setModel] = useState("");
+  const [availableModels, setAvailableModels] = useState<AvailableWhisperModel[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(true);
+  const [modelsError, setModelsError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
 
   useEffect(() => {
     const controller = new AbortController();
-    fetch(`${apiBaseUrl}/api/settings`, { cache: "no-store", signal: controller.signal })
-      .then((response) => response.ok ? response.json() : null)
-      .then((settings: ApplicationSettings | null) => {
-        if (!settings) return;
+    Promise.all([
+      fetch(`${apiBaseUrl}/api/settings`, { cache: "no-store", signal: controller.signal }),
+      getAvailableWhisperModels(controller.signal),
+    ]).then(async ([settingsResponse, models]) => {
+        if (!settingsResponse.ok) throw new Error("Settings could not be loaded");
+        const settings = await settingsResponse.json() as ApplicationSettings;
+        setAvailableModels(models);
         setSourceLanguage(settings.general.default_language);
         setTargetLanguage(settings.translation.default_target_language);
-        setModel(settings.general.default_whisper_model);
-      }).catch(() => undefined);
+        setModel(models.some(({ model }) => model === settings.general.default_whisper_model)
+          ? settings.general.default_whisper_model
+          : "");
+      }).catch((loadError) => {
+        if (loadError instanceof DOMException && loadError.name === "AbortError") return;
+        setModelsError(loadError instanceof Error ? loadError.message : "Available Whisper models could not be loaded");
+      }).finally(() => setModelsLoading(false));
     return () => controller.abort();
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const refreshModels = () => void getAvailableWhisperModels(controller.signal).then((models) => {
+      setAvailableModels(models);
+      setModel((current) => models.some((item) => item.model === current) ? current : "");
+    }).catch(() => undefined);
+    window.addEventListener("focus", refreshModels);
+    return () => {
+      controller.abort();
+      window.removeEventListener("focus", refreshModels);
+    };
   }, []);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
@@ -35,6 +60,10 @@ export default function TranslatePage() {
     }
     if (!targetLanguage) {
       setError("Target language is required.");
+      return;
+    }
+    if (!model) {
+      setError("Select an available Whisper model first.");
       return;
     }
 
@@ -97,15 +126,15 @@ export default function TranslatePage() {
             </label>
             <label>
               Whisper model
-              <select disabled={submitting} onChange={(event) => setModel(event.target.value)} value={model}>
-                <option value="tiny">Tiny</option>
-                <option value="base">Base</option>
-                <option value="small">Small</option>
-                <option value="medium">Medium</option>
-                <option value="large">Large</option>
+              <select disabled={submitting || modelsLoading || availableModels.length === 0} onChange={(event) => setModel(event.target.value)} value={model}>
+                <option disabled value="">{modelsLoading ? "Loading models…" : "Select an available model"}</option>
+                {availableModels.map(({ model: availableModel }) => <option key={availableModel} value={availableModel}>{availableModel}</option>)}
               </select>
             </label>
           </div>
+
+          {!modelsLoading && availableModels.length === 0 ? <p className="error-callout" role="alert">No Whisper model is available. <Link href="/settings#whisper-models">Open Settings → Whisper Models</Link> to download one.</p> : null}
+          {modelsError ? <p className="error-callout" role="alert">{modelsError} <Link href="/settings#whisper-models">Open model settings</Link>.</p> : null}
 
           {file ? (
             <dl className="upload-summary">
@@ -117,7 +146,7 @@ export default function TranslatePage() {
             </dl>
           ) : null}
 
-          <button disabled={submitting} type="submit">
+          <button disabled={submitting || modelsLoading || !model} type="submit">
             {submitting ? "Uploading…" : "Upload & Create Translation Job"}
           </button>
         </form>

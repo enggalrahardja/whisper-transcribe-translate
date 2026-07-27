@@ -17,6 +17,11 @@ from .services.media_files import COLLECTION_NAME as MEDIA_COLLECTION, ensure_me
 from .services.translation_adapter import TranslationAdapter
 from .services.transcripts import COLLECTION_NAME as TRANSCRIPTS_COLLECTION, ensure_transcript_indexes
 from .services.whisper_adapter import WhisperAdapter
+from .services.whisper_models import (
+    WhisperModelUnavailableError,
+    require_whisper_model_available,
+    whisper_model_unavailable_message,
+)
 from .services.storage import resolve_storage_file
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -45,6 +50,8 @@ class TranscriptionWorker:
         self.heartbeat_thread: threading.Thread | None = None
         self.heartbeat_stop = threading.Event()
         self.job_cancel_requested = threading.Event()
+        self.progress_lock = threading.Lock()
+        self.current_job_progress = 0
         self.last_runtime_update = 0.0
         self.last_recovery_check = 0.0
         self.last_cleanup_check = monotonic()
@@ -107,50 +114,101 @@ class TranscriptionWorker:
                     "heartbeat_at": "",
                     "started_at": "",
                     "completed_at": "",
+                    "progress_stage": "",
+                    "progress_message": "",
                 },
             },
         )
         return result.modified_count
 
     def claim_job(self) -> dict | None:
-        now = utc_now()
-        return self.jobs.find_one_and_update(
-            {
-                "status": "queued",
-                "task": {"$in": ["transcribe", "translate"]},
-                "cancellation_requested": {"$ne": True},
-            },
-            {
-                "$set": {
-                    "status": "processing",
-                    "progress": 0,
-                    "error": None,
-                    "worker_id": self.worker_id,
-                    "started_at": now,
-                    "heartbeat_at": now,
-                    "updated_at": now,
-                },
-                "$unset": {"cancellation_requested": "", "completed_at": ""},
-            },
-            sort=[("created_at", ASCENDING)],
-            return_document=ReturnDocument.AFTER,
-        )
+        queued_filter = {
+            "status": "queued",
+            "task": {"$in": ["transcribe", "translate"]},
+            "cancellation_requested": {"$ne": True},
+        }
+        while not self.stopping.is_set():
+            candidate = self.jobs.find_one(queued_filter, sort=[("created_at", ASCENDING)])
+            if candidate is None:
+                return None
 
-    def update_progress(self, job_id: ObjectId, progress: int) -> bool:
-        now = utc_now()
-        result = self.jobs.update_one(
-            {
-                "_id": job_id,
-                "status": "processing",
-                "worker_id": self.worker_id,
-                "cancellation_requested": {"$ne": True},
-            },
-            {"$set": {"progress": max(0, min(progress, 99)), "heartbeat_at": now, "updated_at": now}},
-        )
-        if result.matched_count == 0:
-            self.job_cancel_requested.set()
-            return False
-        return True
+            model_name = str(candidate.get("model", "base"))
+            try:
+                require_whisper_model_available(model_name)
+            except WhisperModelUnavailableError:
+                now = utc_now()
+                self.jobs.update_one(
+                    {"_id": candidate["_id"], **queued_filter},
+                    {
+                        "$set": {
+                            "status": "failed",
+                            "progress": 0,
+                            "progress_stage": None,
+                            "progress_message": None,
+                            "error": whisper_model_unavailable_message(model_name),
+                            "completed_at": now,
+                            "updated_at": now,
+                        },
+                        "$unset": {"worker_id": "", "heartbeat_at": "", "started_at": ""},
+                    },
+                )
+                continue
+
+            now = utc_now()
+            claimed = self.jobs.find_one_and_update(
+                {"_id": candidate["_id"], **queued_filter},
+                {
+                    "$set": {
+                        "status": "processing",
+                        "progress": 0,
+                        "progress_stage": "loading_media",
+                        "progress_message": "Preparing media",
+                        "error": None,
+                        "worker_id": self.worker_id,
+                        "started_at": now,
+                        "heartbeat_at": now,
+                        "updated_at": now,
+                    },
+                    "$unset": {"cancellation_requested": "", "completed_at": ""},
+                },
+                return_document=ReturnDocument.AFTER,
+            )
+            if claimed is not None:
+                return claimed
+        return None
+
+    def update_progress(
+        self,
+        job_id: ObjectId,
+        progress: int,
+        progress_stage: str | None = None,
+        progress_message: str | None = None,
+    ) -> bool:
+        bounded_progress = max(0, min(progress, 99))
+        with self.progress_lock:
+            if bounded_progress < self.current_job_progress:
+                return True
+
+            now = utc_now()
+            fields: dict[str, object] = {"heartbeat_at": now, "updated_at": now}
+            if progress_stage is not None:
+                fields["progress_stage"] = progress_stage
+            if progress_message is not None:
+                fields["progress_message"] = progress_message
+            result = self.jobs.update_one(
+                {
+                    "_id": job_id,
+                    "status": "processing",
+                    "worker_id": self.worker_id,
+                    "cancellation_requested": {"$ne": True},
+                },
+                {"$max": {"progress": bounded_progress}, "$set": fields},
+            )
+            if result.matched_count == 0:
+                self.job_cancel_requested.set()
+                return False
+            self.current_job_progress = max(self.current_job_progress, bounded_progress)
+            return True
 
     def should_cancel_current_job(self) -> bool:
         if self.stopping.is_set() or self.job_cancel_requested.is_set():
@@ -223,6 +281,8 @@ class TranscriptionWorker:
                 "$set": {
                     "status": "completed",
                     "progress": 100,
+                    "progress_stage": "completed",
+                    "progress_message": "Completed",
                     "transcript_id": transcript_id,
                     "heartbeat_at": now,
                     "completed_at": now,
@@ -246,6 +306,8 @@ class TranscriptionWorker:
                 "$set": {
                     "status": "failed",
                     "error": error,
+                    "progress_stage": None,
+                    "progress_message": None,
                     "heartbeat_at": now,
                     "completed_at": now,
                     "updated_at": now,
@@ -272,7 +334,7 @@ class TranscriptionWorker:
                     "updated_at": now,
                     "error": None,
                 },
-                "$unset": {"transcript_id": ""},
+                "$unset": {"transcript_id": "", "progress_stage": "", "progress_message": ""},
             },
         )
         if result.modified_count == 1:
@@ -294,7 +356,13 @@ class TranscriptionWorker:
             },
             {
                 "$set": {"status": "queued", "progress": 0, "updated_at": utc_now()},
-                "$unset": {"worker_id": "", "heartbeat_at": "", "started_at": ""},
+                "$unset": {
+                    "worker_id": "",
+                    "heartbeat_at": "",
+                    "started_at": "",
+                    "progress_stage": "",
+                    "progress_message": "",
+                },
             },
         )
 
@@ -331,6 +399,7 @@ class TranscriptionWorker:
     def process_job(self, job: dict) -> None:
         job_id = job["_id"]
         self.job_cancel_requested.clear()
+        self.current_job_progress = max(0, int(job.get("progress", 0)))
         self.current_job_id = job_id
         self.start_heartbeat(job_id)
         logger.info("Processing job %s with worker %s", job_id, self.worker_id)
@@ -361,24 +430,38 @@ class TranscriptionWorker:
             except (ValueError, FileNotFoundError) as exc:
                 raise FileNotFoundError(f"Media file is missing or outside storage: {stored_path}") from exc
 
-            if not self.update_progress(job_id, 5):
+            if not self.update_progress(job_id, 5, "loading_model", "Loading model"):
                 self.cancel_current_job()
                 return
             transcription_settings = get_application_settings().transcription
             model_name = str(job.get("model", "base"))
-            self.adapter.load_model(model_name)
-            if self.should_cancel_current_job() or not self.update_progress(job_id, 15):
+
+            self.adapter.load_model(
+                model_name,
+                cancel_callback=self.should_cancel_current_job,
+            )
+            if self.should_cancel_current_job() or not self.update_progress(job_id, 30, "loading_media", "Preparing media"):
                 self.cancel_current_job()
                 return
 
             is_translation = job.get("task") == "translate"
+            transcription_last_update = 0.0
+            transcription_last_progress = 30
 
             def on_whisper_progress(percentage: int) -> None:
-                progress_range = 0.4 if is_translation else 0.6
-                mapped_progress = 30 + int(max(0, min(percentage, 100)) * progress_range)
-                self.update_progress(job_id, min(mapped_progress, 69 if is_translation else 89))
+                nonlocal transcription_last_progress, transcription_last_update
+                normalized = max(0, min(int(percentage), 100))
+                mapped = 30 + int(normalized * 60 / 100)
+                now = monotonic()
+                if mapped <= transcription_last_progress and normalized < 100:
+                    return
+                if normalized < 100 and now - transcription_last_update < 0.5:
+                    return
+                if self.update_progress(job_id, mapped, "transcribing", "Transcribing audio"):
+                    transcription_last_progress = mapped
+                    transcription_last_update = now
 
-            if not self.update_progress(job_id, 30):
+            if not self.update_progress(job_id, 30, "transcribing", "Transcribing audio"):
                 self.cancel_current_job()
                 return
             result = self.adapter.transcribe(
@@ -399,7 +482,7 @@ class TranscriptionWorker:
 
             translated_text: str | None = None
             if is_translation:
-                if self.should_cancel_current_job() or not self.update_progress(job_id, 75):
+                if self.should_cancel_current_job() or not self.update_progress(job_id, 90, "saving_result", "Saving transcript"):
                     self.cancel_current_job()
                     return
                 translated_text = self.translation_adapter.translate(
@@ -408,7 +491,7 @@ class TranscriptionWorker:
                     cancel_callback=self.should_cancel_current_job,
                 )
 
-            if self.should_cancel_current_job() or not self.update_progress(job_id, 90):
+            if self.should_cancel_current_job() or not self.update_progress(job_id, 90, "saving_result", "Saving transcript"):
                 self.cancel_current_job()
                 return
             transcript_id = self.save_transcript(job, result, translated_text=translated_text)

@@ -7,6 +7,7 @@ const definitions = [
   ["web", "start-web.mjs"],
   ["api", "start-api.mjs"],
   ["worker", "start-worker.mjs"],
+  ["whisper-model-downloader", "start-model-downloader.mjs"],
 ];
 const env = productionEnv();
 let stopping = false;
@@ -43,7 +44,7 @@ function shutdown(exitCode = 0, signal = "SIGTERM") {
   for (const child of children) signalChild(child, signal);
   const forceTimer = setTimeout(() => {
     for (const child of children) signalChild(child, "SIGKILL");
-  }, 10_000);
+  }, 35_000);
   forceTimer.unref();
 }
 

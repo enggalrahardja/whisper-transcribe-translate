@@ -9,10 +9,12 @@
     "dev:web": "pnpm --dir apps/web dev",
     "dev:api": "node scripts/dev-api.mjs",
     "dev:worker": "node scripts/dev-worker.mjs",
+    "dev:model-downloader": "node scripts/dev-model-downloader.mjs",
     "start": "node scripts/start.mjs",
     "start:web": "node scripts/start-web.mjs",
     "start:api": "node scripts/start-api.mjs",
     "start:worker": "node scripts/start-worker.mjs",
+    "start:model-downloader": "node scripts/start-model-downloader.mjs",
     "health": "node scripts/health.mjs"
   },
   "devDependencies": {

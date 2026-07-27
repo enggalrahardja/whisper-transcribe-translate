@@ -19,6 +19,7 @@ apps/web/next-env.d.ts
 /services/api/.venv/
 /services/api/.env
 /services/api/storage/
+/storage/models/whisper/
 
 /.env.production
 

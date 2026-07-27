@@ -228,6 +228,12 @@ def transcribe(
     with tqdm.tqdm(
         total=content_frames, unit="frames", disable=verbose is not False
     ) as pbar:
+        def report_progress(previous_seek: int) -> None:
+            completed_frames = min(content_frames, seek)
+            pbar.update(completed_frames - previous_seek)
+            if progress_callback and content_frames > 0:
+                progress_callback(int(completed_frames / content_frames * 100))
+
         last_speech_timestamp = 0.0
         while seek < content_frames:
             signal = cancel_func()
@@ -257,7 +263,9 @@ def transcribe(
                     should_skip = False
 
                 if should_skip:
+                    previous_seek = seek
                     seek += segment_size  # fast-forward to the next segment boundary
+                    report_progress(previous_seek)
                     continue
 
             previous_seek = seek
@@ -377,13 +385,7 @@ def transcribe(
                 # do not feed the prompt tokens if a high temperature was used
                 prompt_reset_since = len(all_tokens)
 
-            # update progress bar
-            pbar.update(min(content_frames, seek) - previous_seek)
-
-            # Call progress callback with percentage
-            if progress_callback:
-                progress_percentage = int((min(content_frames, seek) / content_frames) * 100)
-                progress_callback(progress_percentage)
+            report_progress(previous_seek)
 
     return dict(
         text=tokenizer.decode(all_tokens[len(initial_prompt_tokens) :]),

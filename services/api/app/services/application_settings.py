@@ -16,6 +16,7 @@ from ..models.settings import (
     UpdateApplicationSettingsRequest,
     WorkerRuntimeResponse,
 )
+from .whisper_models import is_whisper_model_available
 
 COLLECTION_NAME = "application_settings"
 RUNTIME_COLLECTION = "worker_runtime"
@@ -95,7 +96,30 @@ def invalidate_settings_cache() -> None:
 
 def update_application_settings(payload: UpdateApplicationSettingsRequest) -> ApplicationSettingsResponse:
     values = ApplicationSettingsValues.model_validate(payload.model_dump(exclude={"version"}))
-    document = get_database()[COLLECTION_NAME].find_one_and_update(
+    collection = get_database()[COLLECTION_NAME]
+    current = collection.find_one({"_id": ACTIVE_DOCUMENT_ID}, {"version": 1})
+    if current is not None and current.get("version") != payload.version:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Version conflict: current version is {current['version']}",
+        )
+    if not is_whisper_model_available(values.general.default_whisper_model):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "Default Whisper model is not available locally: "
+                f"{values.general.default_whisper_model}"
+            ),
+        )
+    if not is_whisper_model_available(values.live_transcription.default_live_model):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                "Default live Whisper model is not available locally: "
+                f"{values.live_transcription.default_live_model}"
+            ),
+        )
+    document = collection.find_one_and_update(
         {"_id": ACTIVE_DOCUMENT_ID, "version": payload.version},
         {
             "$set": {**values.model_dump(), "updated_at": utc_now()},
@@ -104,10 +128,10 @@ def update_application_settings(payload: UpdateApplicationSettingsRequest) -> Ap
         return_document=ReturnDocument.AFTER,
     )
     if document is None:
-        current = get_database()[COLLECTION_NAME].find_one({"_id": ACTIVE_DOCUMENT_ID}, {"version": 1})
+        current = collection.find_one({"_id": ACTIVE_DOCUMENT_ID}, {"version": 1})
         if current is None:
             ensure_application_settings()
-            current = get_database()[COLLECTION_NAME].find_one({"_id": ACTIVE_DOCUMENT_ID}, {"version": 1})
+            current = collection.find_one({"_id": ACTIVE_DOCUMENT_ID}, {"version": 1})
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Version conflict: current version is {current['version'] if current else 'unknown'}",

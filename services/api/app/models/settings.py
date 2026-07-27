@@ -5,6 +5,38 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from pydantic import BaseModel, Field, field_validator, model_validator
 
 WhisperModel = Literal["tiny", "base", "small", "medium", "large"]
+WhisperModelStatus = Literal[
+    "not_downloaded", "downloading", "available", "failed", "corrupted", "deleting"
+]
+
+
+class WhisperModelResponse(BaseModel):
+    model: WhisperModel
+    status: WhisperModelStatus
+    file_name: str
+    file_path: str
+    expected_size_bytes: int | None
+    actual_size_bytes: int | None
+    checksum_valid: bool | None
+    downloaded_at: datetime | None
+    last_verified_at: datetime | None
+    last_error: str | None
+    downloaded_bytes: int = 0
+    progress: float = 0
+    download_started_at: datetime | None = None
+    download_completed_at: datetime | None = None
+    download_heartbeat_at: datetime | None = None
+    download_worker_id: str | None = None
+    cancel_requested: bool = False
+    attempt: int = 0
+
+
+class AvailableWhisperModelResponse(BaseModel):
+    model: WhisperModel
+    file_name: str
+    file_path: str
+    actual_size_bytes: int
+    last_verified_at: datetime | None
 
 
 class GeneralSettings(BaseModel):

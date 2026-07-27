@@ -156,7 +156,7 @@ export default function JobDetailPage() {
   const stateMessage = job.status === "queued"
     ? "Waiting for worker"
     : job.status === "processing"
-      ? `${taskLabel} in progress`
+      ? job.progress_message ?? `${taskLabel} in progress`
       : `${taskLabel} ${job.status}`;
 
   return (
@@ -197,7 +197,7 @@ export default function JobDetailPage() {
         {job.status === "queued" ? <p className="state-callout">Waiting for worker</p> : null}
         {job.status === "processing" ? (
           <p className="state-callout">
-            {job.cancellation_requested ? "Cancellation requested — stopping safely" : `Processing ${isTranslation ? "translation" : "audio"} — ${job.progress}%`}
+            {job.cancellation_requested ? "Cancellation requested — stopping safely" : `${job.progress_message ?? `Processing ${isTranslation ? "translation" : "audio"}`} — ${job.progress}%`}
           </p>
         ) : null}
         {job.status === "failed" ? <p className="error-callout" role="alert">{job.error || `The ${taskLabel.toLowerCase()} job failed.`}</p> : null}

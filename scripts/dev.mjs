@@ -153,6 +153,7 @@ const commands = [
   { name: "web", command: "pnpm", args: ["run", "dev:web"] },
   { name: "api", command: "pnpm", args: ["run", "dev:api"] },
   { name: "worker", command: "pnpm", args: ["run", "dev:worker"] },
+  { name: "whisper-model-downloader", command: "pnpm", args: ["run", "dev:model-downloader"] },
 ];
 
 const children = commands.map(({ name, command, args }) => {

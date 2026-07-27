@@ -1,8 +1,9 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { FormEvent, useEffect, useState } from "react";
-import { apiBaseUrl, ApplicationSettings, formatBytes } from "../lib/api";
+import { apiBaseUrl, ApplicationSettings, AvailableWhisperModel, formatBytes, getAvailableWhisperModels } from "../lib/api";
 import { sourceLanguages } from "../lib/languages";
 
 type CreatedJob = {
@@ -15,26 +16,54 @@ export default function TranscribePage() {
   const router = useRouter();
   const [file, setFile] = useState<File | null>(null);
   const [language, setLanguage] = useState("auto");
-  const [model, setModel] = useState("base");
+  const [model, setModel] = useState("");
+  const [availableModels, setAvailableModels] = useState<AvailableWhisperModel[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(true);
+  const [modelsError, setModelsError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [message, setMessage] = useState("");
 
   useEffect(() => {
     const controller = new AbortController();
-    fetch(`${apiBaseUrl}/api/settings`, { cache: "no-store", signal: controller.signal })
-      .then((response) => response.ok ? response.json() : null)
-      .then((settings: ApplicationSettings | null) => {
-        if (!settings) return;
+    Promise.all([
+      fetch(`${apiBaseUrl}/api/settings`, { cache: "no-store", signal: controller.signal }),
+      getAvailableWhisperModels(controller.signal),
+    ]).then(async ([settingsResponse, models]) => {
+        if (!settingsResponse.ok) throw new Error("Settings could not be loaded");
+        const settings = await settingsResponse.json() as ApplicationSettings;
+        setAvailableModels(models);
         setLanguage(settings.general.default_language);
-        setModel(settings.general.default_whisper_model);
-      }).catch(() => undefined);
+        setModel(models.some(({ model }) => model === settings.general.default_whisper_model)
+          ? settings.general.default_whisper_model
+          : "");
+      }).catch((error) => {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        setModelsError(error instanceof Error ? error.message : "Available Whisper models could not be loaded");
+      }).finally(() => setModelsLoading(false));
     return () => controller.abort();
+  }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const refreshModels = () => void getAvailableWhisperModels(controller.signal).then((models) => {
+      setAvailableModels(models);
+      setModel((current) => models.some((item) => item.model === current) ? current : "");
+    }).catch(() => undefined);
+    window.addEventListener("focus", refreshModels);
+    return () => {
+      controller.abort();
+      window.removeEventListener("focus", refreshModels);
+    };
   }, []);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!file) {
       setMessage("Pilih file audio atau video terlebih dahulu.");
+      return;
+    }
+    if (!model) {
+      setMessage("Select an available Whisper model first.");
       return;
     }
 
@@ -99,15 +128,15 @@ export default function TranscribePage() {
 
             <label>
               Whisper Model
-              <select disabled={submitting} onChange={(event) => setModel(event.target.value)} value={model}>
-                <option value="tiny">Tiny</option>
-                <option value="base">Base</option>
-                <option value="small">Small</option>
-                <option value="medium">Medium</option>
-                <option value="large">Large</option>
+              <select disabled={submitting || modelsLoading || availableModels.length === 0} onChange={(event) => setModel(event.target.value)} value={model}>
+                <option disabled value="">{modelsLoading ? "Loading models…" : "Select an available model"}</option>
+                {availableModels.map(({ model: availableModel }) => <option key={availableModel} value={availableModel}>{availableModel}</option>)}
               </select>
             </label>
           </div>
+
+          {!modelsLoading && availableModels.length === 0 ? <p className="error-callout" role="alert">No Whisper model is available. <Link href="/settings#whisper-models">Open Settings → Whisper Models</Link> to download one.</p> : null}
+          {modelsError ? <p className="error-callout" role="alert">{modelsError} <Link href="/settings#whisper-models">Open model settings</Link>.</p> : null}
 
           {file ? (
             <dl className="upload-summary">
@@ -118,7 +147,7 @@ export default function TranscribePage() {
             </dl>
           ) : null}
 
-          <button disabled={submitting} type="submit">
+          <button disabled={submitting || modelsLoading || !model} type="submit">
             {submitting ? "Uploading..." : "Upload & Create Job"}
           </button>
         </form>

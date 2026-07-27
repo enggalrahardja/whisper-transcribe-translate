@@ -1,8 +1,9 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pymongo.errors import PyMongoError
 
 from .config import get_settings
@@ -20,6 +21,7 @@ from .services.media_files import ensure_media_file_indexes
 from .services.subtitle_burns import ensure_subtitle_burn_indexes, recover_interrupted_subtitle_burns
 from .services.subtitle_projects import ensure_subtitle_project_indexes
 from .services.transcripts import ensure_transcript_indexes
+from .services.whisper_models import WhisperModelUnavailableError, ensure_whisper_model_registry
 
 
 @asynccontextmanager
@@ -36,6 +38,7 @@ async def lifespan(_: FastAPI):
         ensure_subtitle_burn_indexes()
         recover_interrupted_subtitle_burns()
         ensure_transcript_indexes()
+        ensure_whisper_model_registry()
         yield
     finally:
         close_database()
@@ -43,6 +46,18 @@ async def lifespan(_: FastAPI):
 
 settings = get_settings()
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
+
+
+@app.exception_handler(WhisperModelUnavailableError)
+async def unavailable_whisper_model_handler(
+    _: Request, exc: WhisperModelUnavailableError
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_409_CONFLICT,
+        content={"detail": str(exc)},
+    )
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=sorted(allowed_web_origins()),

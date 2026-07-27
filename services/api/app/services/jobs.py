@@ -10,6 +10,7 @@ from .media_files import COLLECTION_NAME as MEDIA_FILES_COLLECTION
 from .translation_adapter import normalize_target_language
 from .transcripts import COLLECTION_NAME as TRANSCRIPTS_COLLECTION
 from .storage import resolve_storage_file
+from .whisper_models import require_whisper_model_available, whisper_model_usage
 
 SUBTITLE_PROJECTS_COLLECTION = "subtitle_projects"
 
@@ -33,6 +34,8 @@ def _serialize_job(document: dict) -> JobResponse:
         target_language=document.get("target_language"),
         status=document["status"],
         progress=document.get("progress", 0),
+        progress_stage=document.get("progress_stage"),
+        progress_message=document.get("progress_message"),
         file_size=document.get("file_size"),
         content_type=document.get("content_type"),
         error=document.get("error"),
@@ -52,6 +55,8 @@ def _insert_job(document: dict) -> JobResponse:
     document.update(
         status=JobStatus.QUEUED.value,
         progress=0,
+        progress_stage=None,
+        progress_message=None,
         error=None,
         created_at=now,
         updated_at=now,
@@ -68,7 +73,8 @@ def create_job(payload: CreateJobRequest) -> JobResponse:
             document["target_language"] = normalize_target_language(payload.target_language)
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
-    return _insert_job(document)
+    with whisper_model_usage(payload.model, "job-create"):
+        return _insert_job(document)
 
 
 def create_uploaded_job(
@@ -78,22 +84,25 @@ def create_uploaded_job(
     model: str,
     task: str,
     target_language: str | None = None,
+    availability_reserved: bool = False,
 ) -> JobResponse:
     if task == "translate":
         try:
             target_language = normalize_target_language(target_language)
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
-    return _insert_job(
-        {
-            **media,
-            "media_file_id": media_file_id,
-            "language": language,
-            "model": model,
-            "task": task,
-            "target_language": target_language,
-        }
-    )
+    document = {
+        **media,
+        "media_file_id": media_file_id,
+        "language": language,
+        "model": model,
+        "task": task,
+        "target_language": target_language,
+    }
+    if availability_reserved:
+        return _insert_job(document)
+    with whisper_model_usage(model, "uploaded-job-create"):
+        return _insert_job(document)
 
 
 def list_jobs(limit: int = 20) -> list[JobResponse]:
@@ -139,36 +148,51 @@ def _current_job_or_404(job_object_id: ObjectId) -> dict:
 
 def retry_job(job_id: str) -> JobResponse:
     job_object_id = _object_id_or_404(job_id)
+    current = _current_job_or_404(job_object_id)
+    if current["status"] not in {
+        JobStatus.FAILED.value,
+        JobStatus.CANCELLED.value,
+        JobStatus.QUEUED.value,
+    }:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Only failed or cancelled jobs can be retried",
+        )
+    model = str(current.get("model", "base"))
+    require_whisper_model_available(model)
+    if current["status"] == JobStatus.QUEUED.value:
+        return _serialize_job(current)
     now = datetime.now(timezone.utc)
     collection = get_database()[COLLECTION_NAME]
-    document = collection.find_one_and_update(
-        {"_id": job_object_id, "status": {"$in": [JobStatus.FAILED.value, JobStatus.CANCELLED.value]}},
-        {
-            "$set": {
-                "status": JobStatus.QUEUED.value,
-                "progress": 0,
-                "error": None,
-                "updated_at": now,
+    with whisper_model_usage(model, "job-retry"):
+        document = collection.find_one_and_update(
+            {"_id": job_object_id, "status": {"$in": [JobStatus.FAILED.value, JobStatus.CANCELLED.value]}},
+            {
+                "$set": {
+                    "status": JobStatus.QUEUED.value,
+                    "progress": 0,
+                    "progress_stage": None,
+                    "progress_message": None,
+                    "error": None,
+                    "updated_at": now,
+                },
+                "$unset": {
+                    "cancellation_requested": "",
+                    "worker_id": "",
+                    "heartbeat_at": "",
+                    "started_at": "",
+                    "completed_at": "",
+                    "transcript_id": "",
+                    "recovered_at": "",
+                },
             },
-            "$unset": {
-                "cancellation_requested": "",
-                "worker_id": "",
-                "heartbeat_at": "",
-                "started_at": "",
-                "completed_at": "",
-                "transcript_id": "",
-                "recovered_at": "",
-            },
-        },
-        return_document=ReturnDocument.AFTER,
-    )
+            return_document=ReturnDocument.AFTER,
+        )
     if document is not None:
         get_database()[TRANSCRIPTS_COLLECTION].delete_many({"job_id": job_object_id})
         return _serialize_job(document)
 
     current = _current_job_or_404(job_object_id)
-    if current["status"] == JobStatus.QUEUED.value:
-        return _serialize_job(current)
     raise HTTPException(
         status_code=status.HTTP_409_CONFLICT,
         detail="Only failed or cancelled jobs can be retried",
@@ -186,6 +210,8 @@ def cancel_job(job_id: str) -> JobResponse:
             "$set": {
                 "status": JobStatus.CANCELLED.value,
                 "progress": 0,
+                "progress_stage": None,
+                "progress_message": None,
                 "error": None,
                 "completed_at": now,
                 "updated_at": now,

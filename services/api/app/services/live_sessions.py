@@ -6,6 +6,7 @@ from pymongo import ASCENDING, DESCENDING, ReturnDocument
 
 from ..database import get_database
 from ..models.live import CreateLiveSessionRequest, LiveSessionResponse
+from .whisper_models import whisper_model_usage
 
 COLLECTION_NAME = "live_sessions"
 
@@ -50,26 +51,27 @@ def _get_document(session_id: str) -> dict:
 
 
 def create_live_session(payload: CreateLiveSessionRequest) -> LiveSessionResponse:
-    now = utc_now()
-    document = {
-        "session_id": uuid4().hex,
-        "status": "active",
-        "language": payload.language.strip().lower(),
-        "model": payload.model,
-        "started_at": now,
-        "ended_at": None,
-        "duration": 0.0,
-        "partial_text": "",
-        "final_text": "",
-        "segments": [],
-        "error": None,
-        "audio_cursor": 0.0,
-        "processed_chunk_hashes": [],
-        "paused_seconds": 0.0,
-        "created_at": now,
-        "updated_at": now,
-    }
-    get_database()[COLLECTION_NAME].insert_one(document)
+    with whisper_model_usage(payload.model, "live-session-create"):
+        now = utc_now()
+        document = {
+            "session_id": uuid4().hex,
+            "status": "active",
+            "language": payload.language.strip().lower(),
+            "model": payload.model,
+            "started_at": now,
+            "ended_at": None,
+            "duration": 0.0,
+            "partial_text": "",
+            "final_text": "",
+            "segments": [],
+            "error": None,
+            "audio_cursor": 0.0,
+            "processed_chunk_hashes": [],
+            "paused_seconds": 0.0,
+            "created_at": now,
+            "updated_at": now,
+        }
+        get_database()[COLLECTION_NAME].insert_one(document)
     return _serialize(document)
 
 

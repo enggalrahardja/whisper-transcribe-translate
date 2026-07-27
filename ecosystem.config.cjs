@@ -31,6 +31,7 @@ function productionEnv() {
     NEXT_PUBLIC_API_BASE_URL: "http://127.0.0.1:8000",
     NODE_ENV: "production",
     ...values,
+    ...process.env,
     APP_ENV: "production",
     NODE_ENV: "production",
   };
@@ -72,6 +73,17 @@ module.exports = {
       instances: 1,
       env,
       kill_timeout: 15000,
+    },
+    {
+      name: "whisper-model-downloader",
+      cwd: apiDir,
+      script: python,
+      args: "-m app.model_downloader",
+      interpreter: "none",
+      exec_mode: "fork",
+      instances: 1,
+      env,
+      kill_timeout: Math.max(15000, Number(env.WHISPER_DOWNLOAD_TIMEOUT_SECONDS || 30) * 1000 + 5000),
     },
   ],
 };

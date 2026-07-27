@@ -37,6 +37,8 @@ class JobResponse(BaseModel):
     target_language: str | None = None
     status: JobStatus
     progress: int
+    progress_stage: str | None = None
+    progress_message: str | None = None
     file_size: int | None = None
     content_type: str | None = None
     error: str | None = None

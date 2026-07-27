@@ -37,7 +37,13 @@ header p, .service-card p, .jobs-panel p { color: #687086; }
 .service-card h3 { margin-bottom: 8px; }
 .service-card p { min-height: 66px; font-size: 14px; line-height: 1.55; }
 .service-card button { width: 100%; padding: 10px 14px; border: 0; border-radius: 10px; color: #fff; background: #5b55d9; cursor: pointer; }
-.jobs-panel { margin-top: 24px; padding: 28px; text-align: center; }
+.jobs-panel { margin-top: 24px; padding: 28px; }
+.jobs-panel > div > .eyebrow, .jobs-panel > div > h2, .jobs-panel > div > p { text-align: center; }
+.job-list { display: grid; gap: 10px; margin-top: 20px; }
+.job-row { display: flex; justify-content: space-between; gap: 20px; padding: 14px 16px; border: 1px solid #e8eaf1; border-radius: 12px; text-align: left; }
+.job-row > div { display: flex; flex-direction: column; gap: 5px; }
+.job-row > div:last-child { align-items: flex-end; }
+.job-row span { color: #737b91; font-size: 12px; text-transform: capitalize; }
 
 @media (max-width: 1000px) {
   .shell { grid-template-columns: 1fr; }
@@ -50,4 +56,6 @@ header p, .service-card p, .jobs-panel p { color: #687086; }
   .content { padding: 22px; }
   header { flex-direction: column; }
   .stats, .service-grid { grid-template-columns: 1fr; }
+  .job-row { flex-direction: column; }
+  .job-row > div:last-child { align-items: flex-start; }
 }

@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     app_env: str = "development"
     api_host: str = "127.0.0.1"
     api_port: int = 8000
+    web_origin: str = "http://localhost:3000"
     mongodb_uri: str = "mongodb://127.0.0.1:27017"
     mongodb_database: str = "whisper_transcribe_translate"
     storage_root: str = "storage"

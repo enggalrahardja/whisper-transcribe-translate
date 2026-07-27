@@ -29,6 +29,8 @@ class JobResponse(BaseModel):
     task: str
     status: JobStatus
     progress: int
+    file_size: int | None = None
+    content_type: str | None = None
     error: str | None = None
     created_at: datetime
     updated_at: datetime

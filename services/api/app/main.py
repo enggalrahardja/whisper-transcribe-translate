@@ -7,6 +7,7 @@ from pymongo.errors import PyMongoError
 from .config import get_settings
 from .database import close_database, get_database
 from .routes.jobs import router as jobs_router
+from .routes.uploads import router as uploads_router
 from .services.jobs import ensure_job_indexes
 
 
@@ -27,6 +28,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.include_router(jobs_router)
+app.include_router(uploads_router)
 
 
 @app.get("/health")

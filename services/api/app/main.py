@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
 from pymongo.errors import PyMongoError
 
@@ -13,7 +14,7 @@ from .routes.subtitles import router as subtitles_router
 from .routes.uploads import router as uploads_router
 from .security import allowed_web_origins
 from .services.jobs import ensure_job_indexes
-from .services.application_settings import ensure_application_settings
+from .services.application_settings import RUNTIME_COLLECTION, ensure_application_settings, get_application_settings
 from .services.live_sessions import ensure_live_session_indexes
 from .services.media_files import ensure_media_file_indexes
 from .services.subtitle_burns import ensure_subtitle_burn_indexes, recover_interrupted_subtitle_burns
@@ -23,16 +24,21 @@ from .services.transcripts import ensure_transcript_indexes
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    ensure_application_settings()
-    ensure_job_indexes()
-    ensure_live_session_indexes()
-    ensure_media_file_indexes()
-    ensure_subtitle_project_indexes()
-    ensure_subtitle_burn_indexes()
-    recover_interrupted_subtitle_burns()
-    ensure_transcript_indexes()
-    yield
-    close_database()
+    try:
+        # Make an explicit server selection before running any startup work. This
+        # prevents Uvicorn from appearing healthy while MongoDB is unavailable.
+        get_database().command("ping")
+        ensure_application_settings()
+        ensure_job_indexes()
+        ensure_live_session_indexes()
+        ensure_media_file_indexes()
+        ensure_subtitle_project_indexes()
+        ensure_subtitle_burn_indexes()
+        recover_interrupted_subtitle_burns()
+        ensure_transcript_indexes()
+        yield
+    finally:
+        close_database()
 
 
 settings = get_settings()
@@ -62,4 +68,41 @@ def mongodb_health() -> dict[str, str]:
         get_database().command("ping")
         return {"status": "ok", "database": settings.mongodb_database}
     except PyMongoError as exc:
-        return {"status": "error", "message": str(exc)}
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"status": "error", "message": str(exc)},
+        ) from exc
+
+
+@app.get("/health/worker")
+def worker_health() -> dict[str, str]:
+    try:
+        stale_after = max(
+            10,
+            get_application_settings().worker_processing.stale_heartbeat_threshold_seconds,
+        )
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=stale_after)
+        runtime = get_database()[RUNTIME_COLLECTION].find_one(
+            {"status": "online", "last_heartbeat": {"$gte": cutoff}},
+            sort=[("last_heartbeat", -1)],
+        )
+    except PyMongoError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"status": "error", "message": str(exc)},
+        ) from exc
+
+    if runtime is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={"status": "error", "message": "No fresh worker heartbeat found"},
+        )
+
+    heartbeat = runtime["last_heartbeat"]
+    if heartbeat.tzinfo is None:
+        heartbeat = heartbeat.replace(tzinfo=timezone.utc)
+    return {
+        "status": "ok",
+        "worker_id": str(runtime["worker_id"]),
+        "last_heartbeat": heartbeat.isoformat(),
+    }

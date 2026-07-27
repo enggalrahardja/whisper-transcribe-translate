@@ -20,4 +20,6 @@ apps/web/next-env.d.ts
 /services/api/.env
 /services/api/storage/
 
+/.env.production
+
 storage/

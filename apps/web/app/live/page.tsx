@@ -11,6 +11,16 @@ type UiStatus = "idle" | "requesting" | "active" | "paused" | "stopping" | "comp
 type ConnectionStatus = "disconnected" | "connecting" | "connected" | "processing";
 type AudioContextConstructor = typeof AudioContext;
 type AudioTransport = "legacy" | "pcm";
+type VadRuntimeMetrics = {
+  state: "idle" | "speech_started" | "speech_active" | "speech_ended";
+  speechSegments: number;
+  rejectedShortSegments: number;
+  silenceDurationSkippedMs: number;
+  speechDurationProcessedMs: number;
+  forcedSegmentFinalization: number;
+  averageSegmentDurationMs: number;
+  vadProcessingLatencyMs: number;
+};
 
 const audioTransport: AudioTransport = process.env.NEXT_PUBLIC_LIVE_AUDIO_TRANSPORT === "pcm" ? "pcm" : "legacy";
 const emptyPcmMetrics: PcmTransportMetrics = {
@@ -22,6 +32,16 @@ const emptyPcmMetrics: PcmTransportMetrics = {
   reconnectCount: 0,
   audioDurationReceivedSeconds: 0,
   bufferDepthMs: 0,
+};
+const emptyVadMetrics: VadRuntimeMetrics = {
+  state: "idle",
+  speechSegments: 0,
+  rejectedShortSegments: 0,
+  silenceDurationSkippedMs: 0,
+  speechDurationProcessedMs: 0,
+  forcedSegmentFinalization: 0,
+  averageSegmentDurationMs: 0,
+  vadProcessingLatencyMs: 0,
 };
 
 const defaultLiveSettings = {
@@ -101,6 +121,7 @@ export default function LivePage() {
   const [segments, setSegments] = useState<LiveSession["segments"]>([]);
   const [error, setError] = useState("");
   const [pcmMetrics, setPcmMetrics] = useState<PcmTransportMetrics>(emptyPcmMetrics);
+  const [vadMetrics, setVadMetrics] = useState<VadRuntimeMetrics | null>(null);
 
   const socketRef = useRef<WebSocket | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -208,6 +229,7 @@ export default function LivePage() {
         status?: string;
         expectedSequence?: number;
         metrics?: Record<string, number>;
+        state?: VadRuntimeMetrics["state"];
       };
       if (event.type === "processing") setConnection("processing");
       if (event.type === "connected") setConnection("connected");
@@ -218,6 +240,18 @@ export default function LivePage() {
       }
       if (event.type === "ack" && event.sequence !== undefined && event.status) {
         pcmTransportRef.current?.handleAcknowledgement(event.sequence, event.status, event.metrics);
+      }
+      if (event.type === "vad_state" && event.state && event.metrics) {
+        setVadMetrics({
+          state: event.state,
+          speechSegments: event.metrics.speech_segments ?? 0,
+          rejectedShortSegments: event.metrics.rejected_short_segments ?? 0,
+          silenceDurationSkippedMs: event.metrics.silence_duration_skipped_ms ?? 0,
+          speechDurationProcessedMs: event.metrics.speech_duration_processed_ms ?? 0,
+          forcedSegmentFinalization: event.metrics.forced_segment_finalization ?? 0,
+          averageSegmentDurationMs: event.metrics.average_segment_duration_ms ?? 0,
+          vadProcessingLatencyMs: event.metrics.vad_processing_latency_ms ?? 0,
+        });
       }
       if (event.type === "error") {
         setError(event.message ?? "Live transcription failed");
@@ -324,6 +358,7 @@ export default function LivePage() {
     setFinalText("");
     setSegments([]);
     setPcmMetrics(emptyPcmMetrics);
+    setVadMetrics(null);
 
     let created: LiveSession | null = null;
     try {
@@ -500,6 +535,12 @@ export default function LivePage() {
           <div><span>Lost / duplicate</span><strong>{pcmMetrics.chunksLost} / {pcmMetrics.duplicateChunks}</strong></div>
           <div><span>Out of order / reconnect</span><strong>{pcmMetrics.outOfOrderChunks} / {pcmMetrics.reconnectCount}</strong></div>
           <div><span>Received / buffer</span><strong>{pcmMetrics.audioDurationReceivedSeconds.toFixed(1)}s / {pcmMetrics.bufferDepthMs.toFixed(0)}ms</strong></div>
+        </div> : null}
+        {vadMetrics ? <div className="live-status-grid">
+          <div><span>VAD state / segments</span><strong>{vadMetrics.state} / {vadMetrics.speechSegments}</strong></div>
+          <div><span>Rejected / forced</span><strong>{vadMetrics.rejectedShortSegments} / {vadMetrics.forcedSegmentFinalization}</strong></div>
+          <div><span>Silence skipped / speech</span><strong>{(vadMetrics.silenceDurationSkippedMs / 1000).toFixed(1)}s / {(vadMetrics.speechDurationProcessedMs / 1000).toFixed(1)}s</strong></div>
+          <div><span>Average segment / VAD</span><strong>{vadMetrics.averageSegmentDurationMs.toFixed(0)}ms / {vadMetrics.vadProcessingLatencyMs.toFixed(3)}ms</strong></div>
         </div> : null}
         <div className="live-controls">
           <button disabled={!canStart} onClick={start} type="button">Start</button>

@@ -27,6 +27,12 @@ from ..services.pcm_ingestion import (
     PcmProtocolError,
 )
 from ..services.pcm_transcription import transcribe_pcm_window
+from ..services.vad import (
+    VadConfig,
+    VadProcessResult,
+    VadSessionRegistry,
+    WebRtcSpeechDetector,
+)
 
 router = APIRouter(tags=["live"])
 _connections: dict[str, WebSocket] = {}
@@ -40,6 +46,18 @@ _pcm_registry = PcmIngestionRegistry(
     max_buffer_seconds=_runtime_settings.live_pcm_max_buffer_seconds,
     max_sessions=_runtime_settings.live_pcm_max_sessions,
     max_sequence_gap=_runtime_settings.live_pcm_max_sequence_gap,
+)
+_vad_registry = VadSessionRegistry(
+    VadConfig(
+        speech_threshold=_runtime_settings.live_vad_speech_threshold,
+        silence_duration_ms=_runtime_settings.live_vad_silence_duration_ms,
+        pre_speech_duration_ms=_runtime_settings.live_vad_pre_speech_duration_ms,
+        minimum_speech_duration_ms=_runtime_settings.live_vad_minimum_speech_duration_ms,
+        maximum_segment_duration_ms=_runtime_settings.live_vad_maximum_segment_duration_ms,
+        segment_overlap_ms=_runtime_settings.live_vad_segment_overlap_ms,
+    ),
+    lambda: WebRtcSpeechDetector(_runtime_settings.live_vad_webrtc_mode),
+    max_sessions=_runtime_settings.live_pcm_max_sessions,
 )
 
 
@@ -65,6 +83,36 @@ async def _drain_pcm_transcription(session_id: str, *, flush: bool) -> None:
     lock = _pcm_task_locks.setdefault(session_id, asyncio.Lock())
     target_ms = _runtime_settings.live_pcm_transcription_window_seconds * 1000
     async with lock:
+        if _runtime_settings.live_vad_enabled:
+            try:
+                while True:
+                    window = _pcm_registry.take_audio(
+                        session_id,
+                        target_duration_ms=10,
+                        flush=False,
+                    )
+                    if window is None:
+                        break
+                    result = _vad_registry.process(session_id, window)
+                    await _send_vad_result(session_id, result)
+                    if not await _transcribe_vad_segments(session_id, result):
+                        return
+                if flush:
+                    result = _vad_registry.flush(session_id)
+                    await _send_vad_result(session_id, result)
+                    await _transcribe_vad_segments(session_id, result)
+            except Exception as exc:
+                failed = await asyncio.to_thread(
+                    fail_live_session,
+                    session_id,
+                    f"{type(exc).__name__}: {exc}",
+                )
+                await _send_to_current_connection(
+                    session_id,
+                    _event("error", failed, message=failed.error or str(exc)),
+                )
+            return
+
         while True:
             window = _pcm_registry.take_audio(
                 session_id,
@@ -105,8 +153,63 @@ async def _drain_pcm_transcription(session_id: str, *, flush: bool) -> None:
                 continue
 
 
+async def _send_vad_result(session_id: str, result: VadProcessResult) -> None:
+    await _send_to_current_connection(
+        session_id,
+        _event(
+            "vad_state",
+            transport="pcm16",
+            state=result.state.value,
+            metrics=result.metrics,
+        ),
+    )
+
+
+async def _transcribe_vad_segments(
+    session_id: str,
+    result: VadProcessResult,
+) -> bool:
+    for segment in result.segments:
+        try:
+            session, duplicate = await asyncio.to_thread(
+                transcribe_pcm_window,
+                session_id,
+                segment.window,
+            )
+        except Exception as exc:
+            failed = await asyncio.to_thread(
+                fail_live_session,
+                session_id,
+                f"{type(exc).__name__}: {exc}",
+            )
+            await _send_to_current_connection(
+                session_id,
+                _event("error", failed, message=failed.error or str(exc)),
+            )
+            return False
+        await _send_to_current_connection(
+            session_id,
+            _event(
+                "partial",
+                session,
+                duplicate=duplicate,
+                transport="pcm16",
+                vad=True,
+                vadReason=segment.reason,
+                forced=segment.forced,
+                sequenceStart=segment.window.start_sequence,
+                sequenceEnd=segment.window.end_sequence,
+            ),
+        )
+    return True
+
+
 async def _schedule_pcm_transcription(session_id: str) -> None:
-    target_ms = _runtime_settings.live_pcm_transcription_window_seconds * 1000
+    target_ms = (
+        10
+        if _runtime_settings.live_vad_enabled
+        else _runtime_settings.live_pcm_transcription_window_seconds * 1000
+    )
     if float(_pcm_registry.metrics(session_id)["buffer_depth_ms"]) < target_ms:
         return
     async with _pcm_task_registry_lock:
@@ -127,6 +230,7 @@ async def _finish_pcm_session(session_id: str) -> None:
         _pcm_tasks.pop(session_id, None)
         _pcm_task_locks.pop(session_id, None)
     _pcm_registry.remove(session_id)
+    _vad_registry.remove(session_id)
 
 
 @router.post("/api/live/sessions", response_model=LiveSessionResponse, status_code=status.HTTP_201_CREATED)

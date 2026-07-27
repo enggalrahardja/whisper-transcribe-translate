@@ -138,3 +138,14 @@ bridge are separate components. Sequence acknowledgements and ingestion metrics
 remain WebSocket/runtime state rather than MongoDB fields. See
 `docs/stage2-audio-ingestion.md` for the protocol, limits, feature flags, and
 known process-lifetime limitation.
+
+## Stage 3 addendum
+
+Stage 3 places a local WebRTC VAD consumer after ordered PCM ingestion and
+before the transcription bridge. PCM acknowledgement remains independent of
+VAD and Whisper. Detection, bounded pre-speech/speech buffers, segment
+finalization, and transcription remain separate responsibilities. The VAD
+state and metrics are isolated per session and runtime-only. Legacy live audio
+bypasses VAD, while both PCM and VAD feature flags remain disabled by default.
+See `docs/stage3-voice-activity-detection.md` for timing defaults, metrics,
+limitations, and validation status.

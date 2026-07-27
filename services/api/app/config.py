@@ -30,6 +30,14 @@ class Settings(BaseSettings):
     live_pcm_transcription_window_seconds: float = 3.0
     live_pcm_max_sessions: int = 128
     live_pcm_max_sequence_gap: int = 128
+    live_vad_enabled: bool = False
+    live_vad_speech_threshold: float = 0.6
+    live_vad_silence_duration_ms: int = 600
+    live_vad_pre_speech_duration_ms: int = 300
+    live_vad_minimum_speech_duration_ms: int = 250
+    live_vad_maximum_segment_duration_ms: int = 20_000
+    live_vad_segment_overlap_ms: int = 500
+    live_vad_webrtc_mode: int = 2
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

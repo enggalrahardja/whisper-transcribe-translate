@@ -60,10 +60,17 @@ def _wav_duration(audio: bytes) -> float | None:
         return None
 
 
-def process_live_chunk(session_id: str, audio: bytes) -> tuple[LiveSessionResponse, bool]:
+def process_live_chunk(
+    session_id: str,
+    audio: bytes,
+    *,
+    chunk_identity: str | None = None,
+) -> tuple[LiveSessionResponse, bool]:
     if not audio:
         raise ValueError("Audio chunk is empty")
-    chunk_hash = hashlib.sha256(audio).hexdigest()
+    chunk_hash = hashlib.sha256(
+        chunk_identity.encode("utf-8") if chunk_identity is not None else audio
+    ).hexdigest()
     document, claimed = claim_live_chunk(session_id, chunk_hash)
     if not claimed:
         return LiveSessionResponse(

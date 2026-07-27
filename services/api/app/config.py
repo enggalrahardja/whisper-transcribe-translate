@@ -25,6 +25,11 @@ class Settings(BaseSettings):
     worker_poll_interval_seconds: float = 1.0
     worker_heartbeat_interval_seconds: float = 5.0
     worker_stale_after_seconds: int = 60
+    live_pcm_streaming_enabled: bool = False
+    live_pcm_max_buffer_seconds: float = 10.0
+    live_pcm_transcription_window_seconds: float = 3.0
+    live_pcm_max_sessions: int = 128
+    live_pcm_max_sequence_gap: int = 128
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

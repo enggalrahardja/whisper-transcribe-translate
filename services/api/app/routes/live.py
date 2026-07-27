@@ -3,6 +3,7 @@ import json
 
 from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect, status
 
+from ..config import get_settings
 from ..models.live import CreateLiveSessionRequest, LiveSessionResponse
 from ..security import is_allowed_web_origin
 from ..services.live_processor import process_live_chunk
@@ -16,11 +17,30 @@ from ..services.live_sessions import (
     resume_live_session,
     stop_live_session,
 )
+from ..services.pcm_ingestion import (
+    MAX_CHUNK_DURATION_MS,
+    MIN_CHUNK_DURATION_MS,
+    PCM_CHANNEL_COUNT,
+    PCM_SAMPLE_RATE,
+    PcmChunkMetadata,
+    PcmIngestionRegistry,
+    PcmProtocolError,
+)
+from ..services.pcm_transcription import transcribe_pcm_window
 
 router = APIRouter(tags=["live"])
 _connections: dict[str, WebSocket] = {}
 _connections_lock = asyncio.Lock()
+_pcm_tasks: dict[str, asyncio.Task[None]] = {}
+_pcm_task_locks: dict[str, asyncio.Lock] = {}
+_pcm_task_registry_lock = asyncio.Lock()
 MAX_LIVE_CHUNK_BYTES = 10 * 1024 * 1024
+_runtime_settings = get_settings()
+_pcm_registry = PcmIngestionRegistry(
+    max_buffer_seconds=_runtime_settings.live_pcm_max_buffer_seconds,
+    max_sessions=_runtime_settings.live_pcm_max_sessions,
+    max_sequence_gap=_runtime_settings.live_pcm_max_sequence_gap,
+)
 
 
 def _event(event_type: str, session: LiveSessionResponse | None = None, **extra: object) -> dict:
@@ -28,6 +48,85 @@ def _event(event_type: str, session: LiveSessionResponse | None = None, **extra:
     if session is not None:
         payload["session"] = session.model_dump(mode="json")
     return payload
+
+
+async def _send_to_current_connection(session_id: str, payload: dict) -> None:
+    async with _connections_lock:
+        websocket = _connections.get(session_id)
+    if websocket is None:
+        return
+    try:
+        await websocket.send_json(payload)
+    except (RuntimeError, WebSocketDisconnect):
+        return
+
+
+async def _drain_pcm_transcription(session_id: str, *, flush: bool) -> None:
+    lock = _pcm_task_locks.setdefault(session_id, asyncio.Lock())
+    target_ms = _runtime_settings.live_pcm_transcription_window_seconds * 1000
+    async with lock:
+        while True:
+            window = _pcm_registry.take_audio(
+                session_id,
+                target_duration_ms=target_ms,
+                flush=flush,
+            )
+            if window is None:
+                return
+            try:
+                session, duplicate = await asyncio.to_thread(
+                    transcribe_pcm_window,
+                    session_id,
+                    window,
+                )
+            except Exception as exc:
+                failed = await asyncio.to_thread(
+                    fail_live_session,
+                    session_id,
+                    f"{type(exc).__name__}: {exc}",
+                )
+                await _send_to_current_connection(
+                    session_id,
+                    _event("error", failed, message=failed.error or str(exc)),
+                )
+                return
+            await _send_to_current_connection(
+                session_id,
+                _event(
+                    "partial",
+                    session,
+                    duplicate=duplicate,
+                    transport="pcm16",
+                    sequenceStart=window.start_sequence,
+                    sequenceEnd=window.end_sequence,
+                ),
+            )
+            if flush:
+                continue
+
+
+async def _schedule_pcm_transcription(session_id: str) -> None:
+    target_ms = _runtime_settings.live_pcm_transcription_window_seconds * 1000
+    if float(_pcm_registry.metrics(session_id)["buffer_depth_ms"]) < target_ms:
+        return
+    async with _pcm_task_registry_lock:
+        existing = _pcm_tasks.get(session_id)
+        if existing is not None and not existing.done():
+            return
+        task = asyncio.create_task(_drain_pcm_transcription(session_id, flush=False))
+        _pcm_tasks[session_id] = task
+
+
+async def _finish_pcm_session(session_id: str) -> None:
+    async with _pcm_task_registry_lock:
+        task = _pcm_tasks.get(session_id)
+    if task is not None:
+        await task
+    await _drain_pcm_transcription(session_id, flush=True)
+    async with _pcm_task_registry_lock:
+        _pcm_tasks.pop(session_id, None)
+        _pcm_task_locks.pop(session_id, None)
+    _pcm_registry.remove(session_id)
 
 
 @router.post("/api/live/sessions", response_model=LiveSessionResponse, status_code=status.HTTP_201_CREATED)
@@ -47,6 +146,7 @@ def get_session(session_id: str) -> LiveSessionResponse:
 
 @router.post("/api/live/sessions/{session_id}/stop", response_model=LiveSessionResponse)
 async def stop_session(session_id: str) -> LiveSessionResponse:
+    await _finish_pcm_session(session_id)
     session = await asyncio.to_thread(stop_live_session, session_id)
     async with _connections_lock:
         websocket = _connections.pop(session_id, None)
@@ -88,6 +188,8 @@ async def live_websocket(websocket: WebSocket, session_id: str) -> None:
             pass
 
     await websocket.send_json(_event("connected", session))
+    pending_pcm_metadata: PcmChunkMetadata | None = None
+    pcm_registered = False
     try:
         while True:
             message = await websocket.receive()
@@ -98,6 +200,30 @@ async def live_websocket(websocket: WebSocket, session_id: str) -> None:
             if audio is not None:
                 if not audio:
                     await websocket.send_json(_event("error", message="Audio chunk is empty"))
+                    continue
+                if pending_pcm_metadata is not None:
+                    metadata = pending_pcm_metadata
+                    pending_pcm_metadata = None
+                    try:
+                        outcome = _pcm_registry.ingest(session_id, metadata, audio)
+                    except PcmProtocolError as exc:
+                        await websocket.send_json(
+                            _event(
+                                "error",
+                                message=str(exc),
+                                transport="pcm16",
+                                sequence=metadata.sequence,
+                            )
+                        )
+                        continue
+                    await websocket.send_json(
+                        _event(
+                            "ack",
+                            **outcome.acknowledgement(),
+                        )
+                    )
+                    if outcome.status != "backpressure":
+                        await _schedule_pcm_transcription(session_id)
                     continue
                 if len(audio) > MAX_LIVE_CHUNK_BYTES:
                     await websocket.send_json(_event("error", message="Audio chunk exceeds the 10 MB limit"))
@@ -125,16 +251,70 @@ async def live_websocket(websocket: WebSocket, session_id: str) -> None:
             except json.JSONDecodeError:
                 await websocket.send_json(_event("error", message="Invalid WebSocket command"))
                 continue
+            if not isinstance(command, dict):
+                await websocket.send_json(_event("error", message="WebSocket command must be an object"))
+                continue
 
             command_type = command.get("type")
             try:
-                if command_type == "pause":
+                if pending_pcm_metadata is not None:
+                    pending_pcm_metadata = None
+                    await websocket.send_json(
+                        _event("error", message="Expected PCM binary frame after chunk metadata")
+                    )
+                    continue
+                if command_type == "pcm_hello":
+                    if not _runtime_settings.live_pcm_streaming_enabled:
+                        await websocket.send_json(
+                            _event("error", message="PCM streaming is disabled", transport="pcm16")
+                        )
+                        continue
+                    if command.get("sessionId") != session_id:
+                        await websocket.send_json(
+                            _event("error", message="PCM handshake sessionId mismatch", transport="pcm16")
+                        )
+                        continue
+                    metrics = (
+                        _pcm_registry.register_connection(session_id)
+                        if not pcm_registered
+                        else _pcm_registry.metrics(session_id)
+                    )
+                    pcm_registered = True
+                    await websocket.send_json(
+                        _event(
+                            "pcm_ready",
+                            transport="pcm16",
+                            expectedSequence=_pcm_registry.expected_sequence(session_id),
+                            sampleRate=PCM_SAMPLE_RATE,
+                            channelCount=PCM_CHANNEL_COUNT,
+                            chunkDurationMinMs=MIN_CHUNK_DURATION_MS,
+                            chunkDurationMaxMs=MAX_CHUNK_DURATION_MS,
+                            metrics=metrics,
+                        )
+                    )
+                elif command_type == "pcm_chunk":
+                    if not _runtime_settings.live_pcm_streaming_enabled or not pcm_registered:
+                        await websocket.send_json(
+                            _event("error", message="PCM handshake is required", transport="pcm16")
+                        )
+                        continue
+                    try:
+                        pending_pcm_metadata = PcmChunkMetadata.from_payload(command)
+                        if pending_pcm_metadata.session_id != session_id:
+                            raise PcmProtocolError("PCM metadata sessionId mismatch")
+                    except PcmProtocolError as exc:
+                        pending_pcm_metadata = None
+                        await websocket.send_json(
+                            _event("error", message=str(exc), transport="pcm16")
+                        )
+                elif command_type == "pause":
                     session = await asyncio.to_thread(pause_live_session, session_id)
                     await websocket.send_json(_event("connected", session))
                 elif command_type == "resume":
                     session = await asyncio.to_thread(resume_live_session, session_id)
                     await websocket.send_json(_event("connected", session))
                 elif command_type == "stop":
+                    await _finish_pcm_session(session_id)
                     session = await asyncio.to_thread(stop_live_session, session_id)
                     await websocket.send_json(_event("final", session))
                     await websocket.send_json(_event("stopped", session))
@@ -145,6 +325,8 @@ async def live_websocket(websocket: WebSocket, session_id: str) -> None:
             except HTTPException as exc:
                 current = await asyncio.to_thread(get_live_session, session_id)
                 await websocket.send_json(_event("error", current, message=str(exc.detail)))
+            except PcmProtocolError as exc:
+                await websocket.send_json(_event("error", message=str(exc), transport="pcm16"))
     except WebSocketDisconnect:
         await asyncio.to_thread(record_disconnect, session_id)
     finally:

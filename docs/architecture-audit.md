@@ -129,3 +129,12 @@ text, segment timestamps, session timestamps, and errors, but not audio chunks.
 Stage 1 adds only the isolated `benchmarks/` suite and documentation. It does
 not change application workflow, UI, production schemas, provider selection,
 or runtime behavior. Local Whisper remains the application development default.
+
+## Stage 2 addendum
+
+Stage 2 adds an optional AudioWorklet/PCM16 ingestion path alongside the legacy
+WAV path. Its capture, transport, bounded runtime buffer, and transcription
+bridge are separate components. Sequence acknowledgements and ingestion metrics
+remain WebSocket/runtime state rather than MongoDB fields. See
+`docs/stage2-audio-ingestion.md` for the protocol, limits, feature flags, and
+known process-lifetime limitation.

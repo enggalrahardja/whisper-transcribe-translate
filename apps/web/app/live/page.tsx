@@ -4,10 +4,25 @@ import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { apiBaseUrl, ApplicationSettings, AvailableWhisperModel, getAvailableWhisperModels, LiveSession, websocketBaseUrl } from "../lib/api";
 import { languageLabel, sourceLanguages } from "../lib/languages";
+import { PcmAudioCapture } from "./pcm-capture";
+import { PcmTransportMetrics, PcmWebSocketTransport } from "./pcm-transport";
 
 type UiStatus = "idle" | "requesting" | "active" | "paused" | "stopping" | "completed" | "failed";
 type ConnectionStatus = "disconnected" | "connecting" | "connected" | "processing";
 type AudioContextConstructor = typeof AudioContext;
+type AudioTransport = "legacy" | "pcm";
+
+const audioTransport: AudioTransport = process.env.NEXT_PUBLIC_LIVE_AUDIO_TRANSPORT === "pcm" ? "pcm" : "legacy";
+const emptyPcmMetrics: PcmTransportMetrics = {
+  chunksSent: 0,
+  chunksAcknowledged: 0,
+  chunksLost: 0,
+  duplicateChunks: 0,
+  outOfOrderChunks: 0,
+  reconnectCount: 0,
+  audioDurationReceivedSeconds: 0,
+  bufferDepthMs: 0,
+};
 
 const defaultLiveSettings = {
   chunk_duration_seconds: 3,
@@ -85,6 +100,7 @@ export default function LivePage() {
   const [finalText, setFinalText] = useState("");
   const [segments, setSegments] = useState<LiveSession["segments"]>([]);
   const [error, setError] = useState("");
+  const [pcmMetrics, setPcmMetrics] = useState<PcmTransportMetrics>(emptyPcmMetrics);
 
   const socketRef = useRef<WebSocket | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -92,6 +108,8 @@ export default function LivePage() {
   const sourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
   const gainRef = useRef<GainNode | null>(null);
+  const pcmCaptureRef = useRef<PcmAudioCapture | null>(null);
+  const pcmTransportRef = useRef<PcmWebSocketTransport | null>(null);
   const buffersRef = useRef<Float32Array[]>([]);
   const sampleCountRef = useRef(0);
   const sampleRateRef = useRef(16000);
@@ -116,6 +134,10 @@ export default function LivePage() {
     processorRef.current = null;
     sourceRef.current = null;
     gainRef.current = null;
+    pcmCaptureRef.current?.stop();
+    pcmCaptureRef.current = null;
+    pcmTransportRef.current?.reset();
+    pcmTransportRef.current = null;
     if (audioContextRef.current && audioContextRef.current.state !== "closed") void audioContextRef.current.close();
     audioContextRef.current = null;
     streamRef.current?.getTracks().forEach((track) => track.stop());
@@ -173,15 +195,30 @@ export default function LivePage() {
       reconnectAttemptsRef.current = 0;
       setConnection("connected");
       setError("");
-      for (const audio of pendingAudioRef.current.splice(0)) socket.send(audio);
+      if (audioTransport === "pcm") pcmTransportRef.current?.attachSocket(socket, sessionId);
+      else for (const audio of pendingAudioRef.current.splice(0)) socket.send(audio);
       for (const command of pendingCommandsRef.current.splice(0)) socket.send(command);
     };
     socket.onmessage = (message) => {
-      const event = JSON.parse(message.data) as { type: string; session?: LiveSession; message?: string };
+      const event = JSON.parse(message.data) as {
+        type: string;
+        session?: LiveSession;
+        message?: string;
+        sequence?: number;
+        status?: string;
+        expectedSequence?: number;
+        metrics?: Record<string, number>;
+      };
       if (event.type === "processing") setConnection("processing");
       if (event.type === "connected") setConnection("connected");
       if (event.session) applySession(event.session);
       if (event.type === "partial") setConnection("connected");
+      if (event.type === "pcm_ready" && event.expectedSequence !== undefined) {
+        pcmTransportRef.current?.handleReady(event.expectedSequence, event.metrics);
+      }
+      if (event.type === "ack" && event.sequence !== undefined && event.status) {
+        pcmTransportRef.current?.handleAcknowledgement(event.sequence, event.status, event.metrics);
+      }
       if (event.type === "error") {
         setError(event.message ?? "Live transcription failed");
         if (event.session?.status === "failed") setUiStatus("failed");
@@ -193,6 +230,7 @@ export default function LivePage() {
     };
     socket.onerror = () => setError("WebSocket connection failed");
     socket.onclose = () => {
+      pcmTransportRef.current?.detachSocket(socket);
       if (socketRef.current === socket) socketRef.current = null;
       setConnection("disconnected");
       if (!intentionalCloseRef.current && sessionActiveRef.current) {
@@ -210,7 +248,7 @@ export default function LivePage() {
     };
   }, [applySession]);
 
-  const setupAudio = useCallback((stream: MediaStream) => {
+  const setupLegacyAudio = useCallback((stream: MediaStream) => {
     const AudioContextClass = window.AudioContext ?? (window as typeof window & { webkitAudioContext?: AudioContextConstructor }).webkitAudioContext;
     if (!AudioContextClass) throw new Error("This browser does not support Web Audio microphone capture.");
     const context = new AudioContextClass();
@@ -237,6 +275,24 @@ export default function LivePage() {
     captureEnabledRef.current = true;
     setMicrophone("Active · mono");
   }, [flushAudio]);
+
+  const setupPcmAudio = useCallback(async (stream: MediaStream) => {
+    const capture = new PcmAudioCapture();
+    pcmCaptureRef.current = capture;
+    await capture.start(stream, (chunk) => {
+      if (!captureEnabledRef.current) return;
+      const samples = new Int16Array(chunk.pcm);
+      for (let index = 0; index < samples.length; index += 1) {
+        if (Math.abs(samples[index]) > 327) {
+          lastSoundAtRef.current = Date.now();
+          break;
+        }
+      }
+      pcmTransportRef.current?.enqueue(chunk);
+    });
+    captureEnabledRef.current = true;
+    setMicrophone("Active · PCM16 mono 16 kHz · 200 ms");
+  }, []);
 
   async function start() {
     if (modelsLoading || !model || !availableModels.some((item) => item.model === model)) {
@@ -267,6 +323,7 @@ export default function LivePage() {
     setPartialText("");
     setFinalText("");
     setSegments([]);
+    setPcmMetrics(emptyPcmMetrics);
 
     let created: LiveSession | null = null;
     try {
@@ -286,7 +343,12 @@ export default function LivePage() {
       sessionIdRef.current = created.session_id;
       sessionActiveRef.current = true;
       applySession(created);
-      setupAudio(stream);
+      if (audioTransport === "pcm") {
+        pcmTransportRef.current = new PcmWebSocketTransport(setPcmMetrics);
+        await setupPcmAudio(stream);
+      } else {
+        setupLegacyAudio(stream);
+      }
       connectSocket(created.session_id);
     } catch (startError) {
       if (created) {
@@ -304,13 +366,15 @@ export default function LivePage() {
   function pauseOrResume() {
     if (uiStatus === "active") {
       captureEnabledRef.current = false;
-      flushAudio();
+      if (audioTransport === "pcm") pcmCaptureRef.current?.setEnabled(false);
+      else flushAudio();
       sendCommand("pause");
       setUiStatus("paused");
       setMicrophone("Paused");
     } else if (uiStatus === "paused") {
       sendCommand("resume");
       captureEnabledRef.current = true;
+      if (audioTransport === "pcm") pcmCaptureRef.current?.setEnabled(true);
       setUiStatus("active");
       setMicrophone("Active · mono");
     }
@@ -320,7 +384,8 @@ export default function LivePage() {
     if (!sessionIdRef.current || !sessionActiveRef.current) return;
     setUiStatus("stopping");
     captureEnabledRef.current = false;
-    flushAudio();
+    if (audioTransport === "pcm") pcmCaptureRef.current?.setEnabled(false);
+    else flushAudio();
     sendCommand("stop");
     stopAudio();
     stopFallbackRef.current = setTimeout(async () => {
@@ -412,7 +477,7 @@ export default function LivePage() {
   return (
     <section className="live-page">
       <header className="live-header">
-        <div><p className="eyebrow">LIVE TRANSCRIPTION</p><h1>Browser microphone</h1><p>Capture mono audio and transcribe it in short Whisper chunks.</p></div>
+        <div><p className="eyebrow">LIVE TRANSCRIPTION</p><h1>Browser microphone</h1><p>Capture mono audio using the {audioTransport === "pcm" ? "AudioWorklet PCM16" : "legacy WAV"} transport.</p></div>
         <strong className={`live-pill live-${uiStatus}`}>{uiStatus}</strong>
       </header>
 
@@ -428,7 +493,14 @@ export default function LivePage() {
           <div><span>Connection</span><strong>{connection}</strong></div>
           <div><span>Session timer</span><strong>{formatTimer(elapsed)}</strong></div>
           <div><span>Language</span><strong>{languageLabel(language)}</strong></div>
+          <div><span>Audio transport</span><strong>{audioTransport === "pcm" ? "PCM16 · 16 kHz · 200 ms" : "Legacy WAV"}</strong></div>
         </div>
+        {audioTransport === "pcm" ? <div className="live-status-grid">
+          <div><span>Chunks sent / ACK</span><strong>{pcmMetrics.chunksSent} / {pcmMetrics.chunksAcknowledged}</strong></div>
+          <div><span>Lost / duplicate</span><strong>{pcmMetrics.chunksLost} / {pcmMetrics.duplicateChunks}</strong></div>
+          <div><span>Out of order / reconnect</span><strong>{pcmMetrics.outOfOrderChunks} / {pcmMetrics.reconnectCount}</strong></div>
+          <div><span>Received / buffer</span><strong>{pcmMetrics.audioDurationReceivedSeconds.toFixed(1)}s / {pcmMetrics.bufferDepthMs.toFixed(0)}ms</strong></div>
+        </div> : null}
         <div className="live-controls">
           <button disabled={!canStart} onClick={start} type="button">Start</button>
           <button className="secondary" disabled={!(["active", "paused"] as UiStatus[]).includes(uiStatus)} onClick={pauseOrResume} type="button">{uiStatus === "paused" ? "Resume" : "Pause"}</button>

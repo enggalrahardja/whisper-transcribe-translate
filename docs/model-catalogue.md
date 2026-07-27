@@ -15,15 +15,24 @@ costs remain deployment costs. Audio stays local during ASR.
 | Model/version | Functionality | Accuracy classification | Streaming support | Translation support | Diarization | Hardware requirement | Privacy implication | Pricing | Benchmark status | Known limitations |
 |---|---|---|---|---|---|---|---|---|---|---|
 | `tiny` checkpoint pinned by repository SHA-256 | Multilingual ASR | Unclassified | Chunked application emulation; no native streaming | No in current app | No | CPU supported; GPU optional; project legacy guide uses about 1 GB VRAM | Local ASR audio | No model fee | Not run | Lowest-capacity implemented checkpoint; quality unknown on internal corpus |
-| `base` SHA-256 `ed3a0b…6e34e` | Multilingual ASR; current file/live default | Unclassified | Chunked application emulation; no stable event | No in current app | No | CPU supported; GPU optional; project legacy guide uses about 1 GB VRAM | Local ASR audio | No model fee | Not run; checkpoint present on audit machine | Live output arrives per complete chunk; final copies partial |
+| `base` SHA-256 `ed3a0b…6e34e` | Multilingual ASR; current file/live and accurate-final development default | Unclassified | Application semantic partial/stable/final over completed VAD segments; no native token streaming | No in current app | No | CPU supported; GPU optional; project legacy guide uses about 1 GB VRAM | Local ASR audio and local glossary context | No model fee | Automated pipeline tests pass; acoustic benchmark not run | Semantic states and glossary correction cannot replace acoustic validation |
 | `small` checkpoint pinned by repository SHA-256 | Multilingual ASR | Unclassified | Chunked application emulation; no native streaming | No in current app | No | CPU supported; GPU optional; project legacy guide uses about 2 GB VRAM | Local ASR audio | No model fee | Not run | Higher compute/memory than base; internal latency unknown |
 | `medium` checkpoint pinned by repository SHA-256 | Multilingual ASR | Unclassified | Chunked application emulation; no native streaming | No in current app | No | CPU supported; GPU optional; project legacy guide uses about 5 GB VRAM | Local ASR audio | No model fee | Not run | Internal latency and memory have not been measured |
-| `large` alias to `large-v3.pt`, pinned by repository SHA-256 | Multilingual ASR | Unclassified | Chunked application emulation; no native streaming | No in current app | No | CPU technically supported; GPU practical; project legacy guide uses about 10 GB VRAM | Local ASR audio | No model fee | Not run | Largest current checkpoint; no separate live/final role and no measured requirement |
+| `large` alias to `large-v3.pt`, pinned by repository SHA-256 | Multilingual ASR; configurable accurate-final model | Unclassified | Chunked application emulation; no native streaming | No in current app | No | CPU technically supported; GPU practical; project legacy guide uses about 10 GB VRAM | Local ASR audio and local glossary context | No model fee | Not run | Largest current checkpoint; final-path latency and memory are not measured |
 
 Hardware figures above are existing project heuristics from
 `src/logic/model_requirements.py`, not measured minimums or guarantees. The
 benchmark runner records observed CPU, RAM, GPU, and VRAM so they can be
 replaced with evidence.
+
+## Local terminology layer
+
+Stage 6 terminology control is model-independent and may provide local prompt
+context plus deterministic whole-word post-correction to the live and
+accurate-final paths. Raw model output remains available alongside corrected
+text and applied corrections. The glossary does not change any model's
+accuracy classification or benchmark status, and is not a substitute for
+acoustic accuracy. It is disabled by default.
 
 ## Implemented translation provider
 

@@ -27,6 +27,9 @@ class LiveTranscriptUpdate:
     language: str
     model: str
     latency_ms: float
+    raw_text: str | None = None
+    glossary_corrections: tuple[dict[str, object], ...] = ()
+    glossary_version: str | None = None
 
     def validate(self) -> None:
         if not self.session_id or not self.segment_id:
@@ -56,6 +59,9 @@ class LiveTranscriptUpdate:
             "language": self.language,
             "model": self.model,
             "latencyMs": round(self.latency_ms, 3),
+            "rawText": self.raw_text,
+            "glossaryCorrections": list(self.glossary_corrections),
+            "glossaryVersion": self.glossary_version,
         }
 
 

@@ -12,6 +12,11 @@ from pathlib import Path
 from time import monotonic, perf_counter
 from typing import Awaitable, Callable, Protocol
 
+from .glossary import (
+    DisabledGlossarySnapshot,
+    GlossaryCorrection,
+    GlossarySnapshot,
+)
 from .whisper_adapter import WhisperAdapter
 from .whisper_model_metadata import WHISPER_MODEL_METADATA
 from .whisper_models import resolve_available_whisper_model_path
@@ -72,6 +77,11 @@ class FinalTranscriptionRequest:
     end_ms: float
     language: str
     audio_wav: bytes = field(repr=False)
+    glossary: GlossarySnapshot | DisabledGlossarySnapshot | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     @property
     def idempotency_key(self) -> str:
@@ -112,6 +122,9 @@ class FinalModelMetadata:
 class FinalTranscriptionResult:
     text: str
     metadata: FinalModelMetadata
+    raw_text: str | None = None
+    glossary_corrections: tuple[GlossaryCorrection, ...] = ()
+    glossary_version: str | None = None
 
 
 @dataclass(frozen=True)
@@ -138,6 +151,11 @@ class FinalJobSnapshot:
             "startedAt": self.started_at.isoformat() if self.started_at else None,
             "completedAt": self.completed_at.isoformat() if self.completed_at else None,
             "text": self.result.text if self.result is not None else None,
+            "rawText": self.result.raw_text if self.result is not None else None,
+            "glossaryCorrections": [
+                correction.as_dict() for correction in self.result.glossary_corrections
+            ] if self.result is not None else [],
+            "glossaryVersion": self.result.glossary_version if self.result is not None else None,
             "metadata": self.result.metadata.as_dict() if self.result is not None else None,
             "error": self.error,
         }
@@ -213,6 +231,11 @@ class PersistentLocalFinalTranscriber:
                 fp16=self._uses_fp16(),
                 beam_size=self.config.beam_size,
                 temperature=0.0,
+                initial_prompt=(
+                    request.glossary.prompt_context
+                    if request.glossary is not None
+                    else None
+                ),
                 word_timestamps=False,
             )
         except InterruptedError as exc:
@@ -226,15 +249,30 @@ class PersistentLocalFinalTranscriber:
                 temporary_path.unlink(missing_ok=True)
 
         latency_ms = (perf_counter() - started) * 1000
-        text = str(result.get("text", "")).strip()
-        if not text:
+        raw_text = str(result.get("text", "")).strip()
+        if not raw_text:
             raise ValueError("Accurate final transcription returned empty text")
+        correction = (
+            request.glossary.correct(raw_text, language=request.language)
+            if request.glossary is not None
+            else None
+        )
+        text = correction.corrected_text if correction is not None else raw_text
         raw_segments = result.get("segments", [])
         timestamps = tuple(
             {
                 "startMs": round(request.start_ms + float(segment.get("start", 0)) * 1000, 3),
                 "endMs": round(request.start_ms + float(segment.get("end", 0)) * 1000, 3),
-                "text": str(segment.get("text", "")).strip(),
+                "rawText": str(segment.get("text", "")).strip(),
+                "text": (
+                    request.glossary.correct(
+                        str(segment.get("text", "")).strip(),
+                        language=request.language,
+                        record_metrics=False,
+                    ).corrected_text
+                    if request.glossary is not None
+                    else str(segment.get("text", "")).strip()
+                ),
             }
             for segment in raw_segments
             if str(segment.get("text", "")).strip()
@@ -242,6 +280,9 @@ class PersistentLocalFinalTranscriber:
         checkpoint = WHISPER_MODEL_METADATA[self.config.model]
         return FinalTranscriptionResult(
             text=text,
+            raw_text=raw_text,
+            glossary_corrections=correction.corrections if correction is not None else (),
+            glossary_version=correction.glossary_version if correction is not None else None,
             metadata=FinalModelMetadata(
                 model=self.config.model,
                 checkpoint_path=str(self._checkpoint_path),

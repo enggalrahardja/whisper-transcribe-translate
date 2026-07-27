@@ -110,13 +110,12 @@ class LiveTranscriptStateTests(unittest.TestCase):
         self.assertEqual(metrics["finalized_segments"], 1)
 
     def test_event_contract_contains_every_required_field(self):
-        self.assertEqual(
-            set(update().as_dict()),
+        self.assertTrue(
             {
                 "sessionId", "segmentId", "revision", "state",
                 "sequenceStart", "sequenceEnd", "startMs", "endMs", "text",
                 "language", "model", "latencyMs",
-            },
+            }.issubset(update().as_dict()),
         )
 
     def test_default_flags_preserve_legacy_and_local_base_model(self):

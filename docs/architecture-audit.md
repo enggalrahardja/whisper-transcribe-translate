@@ -182,3 +182,20 @@ The feature is disabled by default; the legacy route, local live `base` default,
 MongoDB schemas, translation, diarization, and provider set are unchanged. See
 `docs/stage5-accurate-final-transcription.md` for configuration, lifecycle,
 failure semantics, metadata, and E2E limitations.
+
+## Stage 6 addendum
+
+Stage 6 adds a local JSON glossary manager in front of both semantic live and
+accurate-final inference. Each VAD segment captures one immutable glossary
+snapshot: its prompt context is combined with the model prompt and the same
+snapshot performs deterministic whole-word post-correction on raw output.
+Accurate-final receives that snapshot with the segment audio, so a runtime
+reload applies only to later segments and never reloads Whisper.
+
+Runtime events retain raw and corrected text, glossary version, and applied
+corrections without changing audio timestamps. Matching is case-aware,
+boundary-safe, priority-resolved, and idempotent; protected terms block lower
+priority overlaps. Metrics remain process-local. The feature flag is off by
+default, no production schema changes were introduced, and legacy, translation,
+diarization, provider selection, and local `base` defaults are unchanged. See
+`docs/stage6-local-glossary.md` for file structure and matching/reload rules.

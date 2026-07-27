@@ -15,6 +15,11 @@ from ..services.final_transcription import (
     LocalFinalTranscriptionQueue,
     PersistentLocalFinalTranscriber,
 )
+from ..services.glossary import (
+    DisabledGlossarySnapshot,
+    GlossaryManager,
+    GlossarySnapshot,
+)
 from ..services.live_transcript_state import (
     LiveTranscriptStateRegistry,
     LiveTranscriptUpdate,
@@ -82,6 +87,18 @@ _live_state_registry = LiveTranscriptStateRegistry(
     max_sessions=_runtime_settings.live_pcm_max_sessions,
 )
 _final_queue: LocalFinalTranscriptionQueue | None = None
+_glossary_manager: GlossaryManager | None = None
+
+
+def _get_glossary_manager() -> GlossaryManager:
+    global _glossary_manager
+    if _glossary_manager is None:
+        _glossary_manager = GlossaryManager(
+            _runtime_settings.live_glossary_path,
+            enabled=_runtime_settings.live_glossary_enabled,
+            prompt_max_terms=_runtime_settings.live_glossary_prompt_max_terms,
+        )
+    return _glossary_manager
 
 
 def _get_final_queue() -> LocalFinalTranscriptionQueue:
@@ -218,6 +235,11 @@ async def _transcribe_vad_segments(
     result: VadProcessResult,
 ) -> bool:
     for segment in result.segments:
+        glossary = (
+            _get_glossary_manager().snapshot()
+            if _runtime_settings.live_glossary_enabled
+            else None
+        )
         try:
             detailed: PcmTranscriptionResult | None = None
             if _runtime_settings.live_transcript_state_enabled:
@@ -225,6 +247,7 @@ async def _transcribe_vad_segments(
                     transcribe_pcm_window_detailed,
                     session_id,
                     segment.window,
+                    glossary,
                 )
                 session, duplicate = detailed.session, detailed.duplicate
             else:
@@ -261,7 +284,12 @@ async def _transcribe_vad_segments(
         if detailed is not None and not detailed.duplicate:
             await _send_live_transcript_lifecycle(session_id, detailed)
             if _runtime_settings.live_accurate_final_enabled:
-                await _enqueue_accurate_final(session_id, detailed, segment.window)
+                await _enqueue_accurate_final(
+                    session_id,
+                    detailed,
+                    segment.window,
+                    glossary,
+                )
     return True
 
 
@@ -280,6 +308,11 @@ async def _send_live_transcript_lifecycle(
         "language": result.session.language,
         "model": result.session.model,
         "latency_ms": result.latency_ms,
+        "raw_text": result.raw_text,
+        "glossary_corrections": tuple(
+            correction.as_dict() for correction in result.glossary_corrections
+        ),
+        "glossary_version": result.glossary_version,
     }
     for revision, state in enumerate(TranscriptState, start=1):
         update = LiveTranscriptUpdate(revision=revision, state=state, **common)
@@ -292,6 +325,11 @@ async def _send_live_transcript_lifecycle(
                 "transcript_state",
                 **update.as_dict(),
                 metrics=_live_state_registry.metrics(session_id),
+                glossaryMetrics=(
+                    _get_glossary_manager().metrics()
+                    if _runtime_settings.live_glossary_enabled
+                    else None
+                ),
             ),
         )
 
@@ -300,6 +338,7 @@ async def _enqueue_accurate_final(
     session_id: str,
     live_result: PcmTranscriptionResult,
     window: PcmAudioWindow,
+    glossary: GlossarySnapshot | DisabledGlossarySnapshot | None,
 ) -> None:
     if not _runtime_settings.live_transcript_state_enabled:
         await _send_to_current_connection(
@@ -323,6 +362,7 @@ async def _enqueue_accurate_final(
         end_ms=live_result.end_ms,
         language=live_result.session.language,
         audio_wav=pcm_window_to_wav(window),
+        glossary=glossary,
     )
     try:
         snapshot, duplicate = await queue.enqueue(request, _handle_final_job_status)
@@ -370,6 +410,12 @@ async def _handle_final_job_status(snapshot: FinalJobSnapshot) -> None:
                 language=snapshot.result.metadata.language,
                 model=snapshot.result.metadata.model,
                 latency_ms=snapshot.result.metadata.latency_ms,
+                raw_text=snapshot.result.raw_text,
+                glossary_corrections=tuple(
+                    correction.as_dict()
+                    for correction in snapshot.result.glossary_corrections
+                ),
+                glossary_version=snapshot.result.glossary_version,
             )
             outcome = _live_state_registry.replace_with_accurate_final(corrected)
             if outcome.accepted:
@@ -380,7 +426,16 @@ async def _handle_final_job_status(snapshot: FinalJobSnapshot) -> None:
                 payload["error"] = outcome.reason
     await _send_to_current_connection(
         snapshot.session_id,
-        _event("final_correction", **payload, metrics=queue.metrics()),
+        _event(
+            "final_correction",
+            **payload,
+            metrics=queue.metrics(),
+            glossaryMetrics=(
+                _get_glossary_manager().metrics()
+                if _runtime_settings.live_glossary_enabled
+                else None
+            ),
+        ),
     )
 
 
@@ -423,6 +478,17 @@ def create_session(payload: CreateLiveSessionRequest) -> LiveSessionResponse:
 @router.get("/api/live/sessions", response_model=list[LiveSessionResponse])
 def get_sessions(limit: int = Query(default=20, ge=1, le=100)) -> list[LiveSessionResponse]:
     return list_live_sessions(limit)
+
+
+@router.post("/api/live/glossary/reload")
+def reload_live_glossary() -> dict[str, object]:
+    manager = _get_glossary_manager()
+    snapshot = manager.reload()
+    return {
+        "enabled": manager.enabled,
+        "version": snapshot.version,
+        "metrics": manager.metrics(),
+    }
 
 
 @router.get("/api/live/sessions/{session_id}", response_model=LiveSessionResponse)
@@ -590,6 +656,11 @@ async def live_websocket(websocket: WebSocket, session_id: str) -> None:
                                     for update in _live_state_registry.snapshot(session_id)
                                 ],
                                 metrics=_live_state_registry.metrics(session_id),
+                                glossaryMetrics=(
+                                    _get_glossary_manager().metrics()
+                                    if _runtime_settings.live_glossary_enabled
+                                    else None
+                                ),
                             )
                         )
                     if _runtime_settings.live_accurate_final_enabled and _final_queue is not None:

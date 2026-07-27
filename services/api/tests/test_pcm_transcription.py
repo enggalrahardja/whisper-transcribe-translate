@@ -6,6 +6,7 @@ from unittest import TestCase
 from unittest.mock import patch
 
 from app.services.pcm_ingestion import PcmAudioWindow
+from app.services.live_processor import LiveChunkDetail
 from app.services.pcm_transcription import (
     pcm_window_to_wav,
     transcribe_pcm_window,
@@ -41,7 +42,7 @@ class PcmTranscriptionBridgeTests(TestCase):
         _, kwargs = process.call_args
         self.assertEqual(kwargs["chunk_identity"], "pcm16:session-a:7:9")
 
-    @patch("app.services.pcm_transcription.process_live_chunk")
+    @patch("app.services.pcm_transcription.process_live_chunk_detailed")
     def test_detailed_bridge_exposes_semantic_segment_contract(self, process):
         identity = "pcm16:session-a:7:9"
         prefix = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12]
@@ -56,6 +57,12 @@ class PcmTranscriptionBridgeTests(TestCase):
                 model="base",
             ),
             False,
+            LiveChunkDetail(
+                raw_text="hello",
+                corrected_text="hello",
+                corrections=(),
+                glossary_version=None,
+            ),
         )
         window = PcmAudioWindow(
             audio=b"\x00\x00" * 9600,

@@ -48,12 +48,23 @@ class Settings(BaseSettings):
     live_final_max_retries: int = 1
     live_final_worker_concurrency: int = 1
     live_final_queue_capacity: int = 128
+    live_glossary_enabled: bool = False
+    live_glossary_path: Path = PROJECT_ROOT / "config/glossary.development.json"
+    live_glossary_prompt_max_terms: int = 64
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     @field_validator("whisper_model_dir", mode="before")
     @classmethod
     def resolve_whisper_model_dir(cls, value: str | Path) -> Path:
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            path = PROJECT_ROOT / path
+        return path.resolve()
+
+    @field_validator("live_glossary_path", mode="before")
+    @classmethod
+    def resolve_live_glossary_path(cls, value: str | Path) -> Path:
         path = Path(value).expanduser()
         if not path.is_absolute():
             path = PROJECT_ROOT / path

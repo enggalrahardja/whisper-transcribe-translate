@@ -9,7 +9,8 @@ from io import BytesIO
 from time import perf_counter
 
 from ..models.live import LiveSessionResponse
-from .live_processor import process_live_chunk
+from .glossary import DisabledGlossarySnapshot, GlossaryCorrection, GlossarySnapshot
+from .live_processor import process_live_chunk, process_live_chunk_detailed
 from .pcm_ingestion import PCM_CHANNEL_COUNT, PCM_SAMPLE_RATE, PCM_SAMPLE_WIDTH_BYTES, PcmAudioWindow
 
 
@@ -21,6 +22,9 @@ class PcmTranscriptionResult:
     sequence_start: int
     sequence_end: int
     text: str
+    raw_text: str
+    glossary_corrections: tuple[GlossaryCorrection, ...]
+    glossary_version: str | None
     start_ms: float
     end_ms: float
     latency_ms: float
@@ -48,13 +52,15 @@ def transcribe_pcm_window(session_id: str, window: PcmAudioWindow):
 def transcribe_pcm_window_detailed(
     session_id: str,
     window: PcmAudioWindow,
+    glossary: GlossarySnapshot | DisabledGlossarySnapshot | None = None,
 ) -> PcmTranscriptionResult:
     identity = f"pcm16:{session_id}:{window.start_sequence}:{window.end_sequence}"
     started = perf_counter()
-    session, duplicate = process_live_chunk(
+    session, duplicate, detail = process_live_chunk_detailed(
         session_id,
         pcm_window_to_wav(window),
         chunk_identity=identity,
+        glossary=glossary,
     )
     latency_ms = (perf_counter() - started) * 1000
     prefix = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12]
@@ -78,11 +84,14 @@ def transcribe_pcm_window_detailed(
         segment_id=f"pcm-{window.start_sequence}-{window.end_sequence}",
         sequence_start=window.start_sequence,
         sequence_end=window.end_sequence,
-        text=" ".join(
+        text=detail.corrected_text if detail is not None else " ".join(
             str(segment.get("text", "")).strip()
             for segment in matching
             if str(segment.get("text", "")).strip()
         ),
+        raw_text=detail.raw_text if detail is not None else "",
+        glossary_corrections=detail.corrections if detail is not None else (),
+        glossary_version=detail.glossary_version if detail is not None else None,
         start_ms=start_ms,
         end_ms=end_ms,
         latency_ms=latency_ms,

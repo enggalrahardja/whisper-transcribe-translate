@@ -1,0 +1,58 @@
+{
+  "terms": [
+    {
+      "preferredSpelling": "SMARTHub",
+      "aliases": ["Smart Hub", "SmartHub", "smart hub"],
+      "doNotChange": false,
+      "category": "product",
+      "priority": 100,
+      "language": "*",
+      "active": true
+    },
+    {
+      "preferredSpelling": "RFID Core",
+      "aliases": ["RFID core", "R F I D Core"],
+      "doNotChange": false,
+      "category": "product",
+      "priority": 100,
+      "language": "*",
+      "active": true
+    },
+    {
+      "preferredSpelling": "TagTrace",
+      "aliases": ["Tag Trace", "tagtrace"],
+      "doNotChange": false,
+      "category": "product",
+      "priority": 100,
+      "language": "*",
+      "active": true
+    },
+    {
+      "preferredSpelling": "FX9600",
+      "aliases": ["FX 9600", "FX-9600"],
+      "doNotChange": false,
+      "category": "model-number",
+      "priority": 110,
+      "language": "*",
+      "active": true
+    },
+    {
+      "preferredSpelling": "Galva Technologies",
+      "aliases": ["Galva Technology", "Galva Tech"],
+      "doNotChange": false,
+      "category": "company",
+      "priority": 100,
+      "language": "*",
+      "active": true
+    },
+    {
+      "preferredSpelling": "CIS",
+      "aliases": [],
+      "doNotChange": true,
+      "category": "abbreviation",
+      "priority": 120,
+      "language": "*",
+      "active": true
+    }
+  ]
+}

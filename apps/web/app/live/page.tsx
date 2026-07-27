@@ -12,6 +12,15 @@ type ConnectionStatus = "disconnected" | "connecting" | "connected" | "processin
 type AudioContextConstructor = typeof AudioContext;
 type AudioTransport = "legacy" | "pcm";
 type TranscriptState = "partial" | "stable" | "final";
+type GlossaryCorrection = {
+  source: string;
+  replacement: string;
+  start: number;
+  end: number;
+  category: string;
+  priority: number;
+  language: string;
+};
 type LiveTranscriptUpdate = {
   sessionId: string;
   segmentId: string;
@@ -25,6 +34,9 @@ type LiveTranscriptUpdate = {
   language: string;
   model: string;
   latencyMs: number;
+  rawText?: string | null;
+  glossaryCorrections?: GlossaryCorrection[];
+  glossaryVersion?: string | null;
 };
 type LiveTranscriptMetrics = {
   partialLatencyMs: number;
@@ -55,6 +67,9 @@ type FinalCorrection = {
   } | null;
   error?: string | null;
   update?: LiveTranscriptUpdate;
+  rawText?: string | null;
+  glossaryCorrections?: GlossaryCorrection[];
+  glossaryVersion?: string | null;
 };
 type FinalCorrectionMetrics = {
   queuedFinalJobs: number;
@@ -76,6 +91,15 @@ type VadRuntimeMetrics = {
   forcedSegmentFinalization: number;
   averageSegmentDurationMs: number;
   vadProcessingLatencyMs: number;
+};
+type GlossaryMetrics = {
+  termsLoaded: number;
+  correctionsApplied: number;
+  segmentsCorrected: number;
+  unmatchedAliases: number;
+  correctionLatencyMs: number;
+  reloadCount: number;
+  conflicts: number;
 };
 
 const audioTransport: AudioTransport = process.env.NEXT_PUBLIC_LIVE_AUDIO_TRANSPORT === "pcm" ? "pcm" : "legacy";
@@ -119,6 +143,15 @@ const emptyFinalCorrectionMetrics: FinalCorrectionMetrics = {
   queueDepth: 0,
   modelLoadTimeMs: 0,
   finalReplacementCount: 0,
+};
+const emptyGlossaryMetrics: GlossaryMetrics = {
+  termsLoaded: 0,
+  correctionsApplied: 0,
+  segmentsCorrected: 0,
+  unmatchedAliases: 0,
+  correctionLatencyMs: 0,
+  reloadCount: 0,
+  conflicts: 0,
 };
 
 const defaultLiveSettings = {
@@ -203,6 +236,7 @@ export default function LivePage() {
   const [liveTranscriptMetrics, setLiveTranscriptMetrics] = useState<LiveTranscriptMetrics>(emptyLiveTranscriptMetrics);
   const [finalCorrections, setFinalCorrections] = useState<Record<string, FinalCorrection>>({});
   const [finalCorrectionMetrics, setFinalCorrectionMetrics] = useState<FinalCorrectionMetrics>(emptyFinalCorrectionMetrics);
+  const [glossaryMetrics, setGlossaryMetrics] = useState<GlossaryMetrics | null>(null);
 
   const socketRef = useRef<WebSocket | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -326,6 +360,7 @@ export default function LivePage() {
         status?: string;
         expectedSequence?: number;
         metrics?: Record<string, number>;
+        glossaryMetrics?: Record<string, number> | null;
         state?: VadRuntimeMetrics["state"] | TranscriptState;
         updates?: LiveTranscriptUpdate[];
         jobs?: FinalCorrection[];
@@ -345,6 +380,9 @@ export default function LivePage() {
         update?: LiveTranscriptUpdate;
         metadata?: FinalCorrection["metadata"];
         error?: string | null;
+        rawText?: string | null;
+        glossaryCorrections?: GlossaryCorrection[];
+        glossaryVersion?: string | null;
       };
       if (event.type === "processing") setConnection("processing");
       if (event.type === "connected") setConnection("connected");
@@ -431,6 +469,17 @@ export default function LivePage() {
           queueDepth: event.metrics.queue_depth ?? 0,
           modelLoadTimeMs: event.metrics.model_load_time_ms ?? 0,
           finalReplacementCount: event.metrics.final_replacement_count ?? 0,
+        });
+      }
+      if (event.glossaryMetrics) {
+        setGlossaryMetrics({
+          termsLoaded: event.glossaryMetrics.glossary_terms_loaded ?? 0,
+          correctionsApplied: event.glossaryMetrics.corrections_applied ?? 0,
+          segmentsCorrected: event.glossaryMetrics.segments_corrected ?? 0,
+          unmatchedAliases: event.glossaryMetrics.unmatched_aliases ?? 0,
+          correctionLatencyMs: event.glossaryMetrics.correction_latency_ms ?? 0,
+          reloadCount: event.glossaryMetrics.glossary_reload_count ?? 0,
+          conflicts: event.glossaryMetrics.correction_conflicts ?? 0,
         });
       }
       if (event.type === "error") {
@@ -543,6 +592,7 @@ export default function LivePage() {
     setLiveTranscriptMetrics(emptyLiveTranscriptMetrics);
     setFinalCorrections({});
     setFinalCorrectionMetrics(emptyFinalCorrectionMetrics);
+    setGlossaryMetrics(null);
 
     let created: LiveSession | null = null;
     try {
@@ -750,6 +800,12 @@ export default function LivePage() {
           <div><span>Processing / model load</span><strong>{finalCorrectionMetrics.processingLatencyMs.toFixed(0)}ms / {finalCorrectionMetrics.modelLoadTimeMs.toFixed(0)}ms</strong></div>
           <div><span>Final replacements</span><strong>{finalCorrectionMetrics.finalReplacementCount}</strong></div>
         </div> : null}
+        {glossaryMetrics ? <div className="live-status-grid">
+          <div><span>Glossary terms / reloads</span><strong>{glossaryMetrics.termsLoaded} / {glossaryMetrics.reloadCount}</strong></div>
+          <div><span>Corrections / segments</span><strong>{glossaryMetrics.correctionsApplied} / {glossaryMetrics.segmentsCorrected}</strong></div>
+          <div><span>Unmatched / conflicts</span><strong>{glossaryMetrics.unmatchedAliases} / {glossaryMetrics.conflicts}</strong></div>
+          <div><span>Correction latency</span><strong>{glossaryMetrics.correctionLatencyMs.toFixed(3)}ms</strong></div>
+        </div> : null}
         <div className="live-controls">
           <button disabled={!canStart} onClick={start} type="button">Start</button>
           <button className="secondary" disabled={!(["active", "paused"] as UiStatus[]).includes(uiStatus)} onClick={pauseOrResume} type="button">{uiStatus === "paused" ? "Resume" : "Pause"}</button>
@@ -771,7 +827,7 @@ export default function LivePage() {
 
       {usesLiveTranscriptState && semanticSegments.length > 0 ? <section className="live-segments"><h2>Semantic segments</h2>{semanticSegments.map((segment) => {
         const correction = finalCorrections[segment.segmentId];
-        return <article className="segment-row" key={segment.segmentId}><span>{(segment.startMs / 1000).toFixed(2)}s to {(segment.endMs / 1000).toFixed(2)}s · {segment.state} · r{segment.revision}{correction ? ` · accurate final: ${correction.status}` : ""}</span><p>{segment.text}</p>{correction?.status === "failed" ? <small>{correction.error ?? "Accurate final failed; live result retained."}</small> : null}{correction?.status === "completed" && correction.metadata ? <small>{correction.metadata.model} · {correction.metadata.device}/{correction.metadata.computeType} · beam {correction.metadata.beamSize}</small> : null}</article>;
+        return <article className="segment-row" key={segment.segmentId}><span>{(segment.startMs / 1000).toFixed(2)}s to {(segment.endMs / 1000).toFixed(2)}s · {segment.state} · r{segment.revision}{correction ? ` · accurate final: ${correction.status}` : ""}</span><p>{segment.text}</p>{segment.rawText && segment.rawText !== segment.text ? <small>Raw model output: {segment.rawText}</small> : null}{segment.glossaryCorrections?.length ? <small>Glossary: {segment.glossaryCorrections.map((item) => `${item.source} → ${item.replacement}`).join(", ")}</small> : null}{correction?.status === "failed" ? <small>{correction.error ?? "Accurate final failed; live result retained."}</small> : null}{correction?.status === "completed" && correction.metadata ? <small>{correction.metadata.model} · {correction.metadata.device}/{correction.metadata.computeType} · beam {correction.metadata.beamSize}</small> : null}</article>;
       })}</section> : null}
 
       {!usesLiveTranscriptState && segments.length > 0 ? <section className="live-segments"><h2>Segments</h2>{segments.map((segment, index) => <article className="segment-row" key={segment.id ?? `${segment.start}-${index}`}><span>{segment.start.toFixed(2)}s → {segment.end.toFixed(2)}s</span><p>{segment.text}</p></article>)}</section> : null}

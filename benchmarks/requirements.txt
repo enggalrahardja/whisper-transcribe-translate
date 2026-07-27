@@ -1,0 +1,2 @@
+# Optional but recommended for child-process CPU and RAM sampling.
+psutil==7.0.0

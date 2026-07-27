@@ -1,0 +1,28 @@
+{
+  "schema_version": "1.0",
+  "run_id": "20260727T134222Z",
+  "started_at": "2026-07-27T13:42:22.429641+00:00",
+  "completed_at": "2026-07-27T13:42:22.429880+00:00",
+  "dataset": {
+    "id": "stage1-safe-benchmark",
+    "version": "0.1.0-placeholder",
+    "manifest": "benchmarks\\dataset\\manifest.json"
+  },
+  "configuration": {
+    "provider": "local-whisper",
+    "model": "base",
+    "model_version": "ed3a0b6b1c0edf879ad9b11b1af5a0e6ab5db9205f891f668f8b0e6c6326e34e",
+    "deployment": "local",
+    "provider_command": "python benchmarks/providers/current_whisper.py"
+  },
+  "execution": {
+    "isolation": "one_provider_process_per_case",
+    "cold_start_included": true,
+    "sample_interval_seconds": 0.2,
+    "timeout_seconds": 1800.0
+  },
+  "results": [],
+  "run_limitations": [
+    "No enabled dataset cases; populate reviewed non-sensitive audio and references before measuring."
+  ]
+}

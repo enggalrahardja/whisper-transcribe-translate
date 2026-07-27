@@ -11,6 +11,29 @@ type UiStatus = "idle" | "requesting" | "active" | "paused" | "stopping" | "comp
 type ConnectionStatus = "disconnected" | "connecting" | "connected" | "processing";
 type AudioContextConstructor = typeof AudioContext;
 type AudioTransport = "legacy" | "pcm";
+type TranscriptState = "partial" | "stable" | "final";
+type LiveTranscriptUpdate = {
+  sessionId: string;
+  segmentId: string;
+  revision: number;
+  state: TranscriptState;
+  sequenceStart: number;
+  sequenceEnd: number;
+  startMs: number;
+  endMs: number;
+  text: string;
+  language: string;
+  model: string;
+  latencyMs: number;
+};
+type LiveTranscriptMetrics = {
+  partialLatencyMs: number;
+  stableLatencyMs: number;
+  finalLatencyMs: number;
+  discardedDuplicate: number;
+  rejectedOutOfOrder: number;
+  finalizedSegments: number;
+};
 type VadRuntimeMetrics = {
   state: "idle" | "speech_started" | "speech_active" | "speech_ended";
   speechSegments: number;
@@ -23,6 +46,8 @@ type VadRuntimeMetrics = {
 };
 
 const audioTransport: AudioTransport = process.env.NEXT_PUBLIC_LIVE_AUDIO_TRANSPORT === "pcm" ? "pcm" : "legacy";
+const liveTranscriptStateEnabled = process.env.NEXT_PUBLIC_LIVE_TRANSCRIPT_STATE_ENABLED === "true";
+const usesLiveTranscriptState = audioTransport === "pcm" && liveTranscriptStateEnabled;
 const emptyPcmMetrics: PcmTransportMetrics = {
   chunksSent: 0,
   chunksAcknowledged: 0,
@@ -42,6 +67,14 @@ const emptyVadMetrics: VadRuntimeMetrics = {
   forcedSegmentFinalization: 0,
   averageSegmentDurationMs: 0,
   vadProcessingLatencyMs: 0,
+};
+const emptyLiveTranscriptMetrics: LiveTranscriptMetrics = {
+  partialLatencyMs: 0,
+  stableLatencyMs: 0,
+  finalLatencyMs: 0,
+  discardedDuplicate: 0,
+  rejectedOutOfOrder: 0,
+  finalizedSegments: 0,
 };
 
 const defaultLiveSettings = {
@@ -122,6 +155,8 @@ export default function LivePage() {
   const [error, setError] = useState("");
   const [pcmMetrics, setPcmMetrics] = useState<PcmTransportMetrics>(emptyPcmMetrics);
   const [vadMetrics, setVadMetrics] = useState<VadRuntimeMetrics | null>(null);
+  const [liveTranscriptUpdates, setLiveTranscriptUpdates] = useState<Record<string, LiveTranscriptUpdate>>({});
+  const [liveTranscriptMetrics, setLiveTranscriptMetrics] = useState<LiveTranscriptMetrics>(emptyLiveTranscriptMetrics);
 
   const socketRef = useRef<WebSocket | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -191,9 +226,11 @@ export default function LivePage() {
 
   const applySession = useCallback((nextSession: LiveSession) => {
     setSession(nextSession);
-    setPartialText(nextSession.partial_text);
-    setFinalText(nextSession.final_text);
-    setSegments(nextSession.segments);
+    if (!usesLiveTranscriptState) {
+      setPartialText(nextSession.partial_text);
+      setFinalText(nextSession.final_text);
+      setSegments(nextSession.segments);
+    }
     if (nextSession.status === "completed" || nextSession.status === "failed") {
       sessionActiveRef.current = false;
       setUiStatus(nextSession.status);
@@ -203,6 +240,20 @@ export default function LivePage() {
       setUiStatus(nextSession.status);
     }
   }, [stopAudio]);
+
+  const applyTranscriptUpdate = useCallback((update: LiveTranscriptUpdate) => {
+    if (!usesLiveTranscriptState || update.sessionId !== sessionIdRef.current) return;
+    setLiveTranscriptUpdates((currentUpdates) => {
+      const current = currentUpdates[update.segmentId];
+      if (current && (
+        current.state === "final"
+        || update.revision <= current.revision
+        || update.revision !== current.revision + 1
+      )) return currentUpdates;
+      if (!current && update.revision !== 1) return currentUpdates;
+      return { ...currentUpdates, [update.segmentId]: update };
+    });
+  }, []);
 
   const connectSocket = useCallback((sessionId: string) => {
     if (!sessionActiveRef.current) return;
@@ -229,7 +280,19 @@ export default function LivePage() {
         status?: string;
         expectedSequence?: number;
         metrics?: Record<string, number>;
-        state?: VadRuntimeMetrics["state"];
+        state?: VadRuntimeMetrics["state"] | TranscriptState;
+        updates?: LiveTranscriptUpdate[];
+        sessionId?: string;
+        segmentId?: string;
+        revision?: number;
+        sequenceStart?: number;
+        sequenceEnd?: number;
+        startMs?: number;
+        endMs?: number;
+        text?: string;
+        language?: string;
+        model?: string;
+        latencyMs?: number;
       };
       if (event.type === "processing") setConnection("processing");
       if (event.type === "connected") setConnection("connected");
@@ -243,7 +306,7 @@ export default function LivePage() {
       }
       if (event.type === "vad_state" && event.state && event.metrics) {
         setVadMetrics({
-          state: event.state,
+          state: event.state as VadRuntimeMetrics["state"],
           speechSegments: event.metrics.speech_segments ?? 0,
           rejectedShortSegments: event.metrics.rejected_short_segments ?? 0,
           silenceDurationSkippedMs: event.metrics.silence_duration_skipped_ms ?? 0,
@@ -251,6 +314,34 @@ export default function LivePage() {
           forcedSegmentFinalization: event.metrics.forced_segment_finalization ?? 0,
           averageSegmentDurationMs: event.metrics.average_segment_duration_ms ?? 0,
           vadProcessingLatencyMs: event.metrics.vad_processing_latency_ms ?? 0,
+        });
+      }
+      if (event.type === "transcript_state_snapshot" && event.updates) {
+        setLiveTranscriptUpdates(Object.fromEntries(
+          event.updates
+            .filter((update) => update.sessionId === sessionIdRef.current)
+            .map((update) => [update.segmentId, update]),
+        ));
+      }
+      if (
+        event.type === "transcript_state"
+        && event.sessionId && event.segmentId && event.revision !== undefined
+        && event.state && ["partial", "stable", "final"].includes(event.state)
+        && event.sequenceStart !== undefined && event.sequenceEnd !== undefined
+        && event.startMs !== undefined && event.endMs !== undefined
+        && event.text !== undefined && event.language && event.model
+        && event.latencyMs !== undefined
+      ) {
+        applyTranscriptUpdate(event as LiveTranscriptUpdate & { type: string });
+      }
+      if ((event.type === "transcript_state" || event.type === "transcript_state_snapshot") && event.metrics) {
+        setLiveTranscriptMetrics({
+          partialLatencyMs: event.metrics.partial_latency_ms ?? 0,
+          stableLatencyMs: event.metrics.stable_latency_ms ?? 0,
+          finalLatencyMs: event.metrics.final_latency_ms ?? 0,
+          discardedDuplicate: event.metrics.discarded_duplicate ?? 0,
+          rejectedOutOfOrder: event.metrics.rejected_out_of_order ?? 0,
+          finalizedSegments: event.metrics.finalized_segments ?? 0,
         });
       }
       if (event.type === "error") {
@@ -280,7 +371,7 @@ export default function LivePage() {
         );
       }
     };
-  }, [applySession]);
+  }, [applySession, applyTranscriptUpdate]);
 
   const setupLegacyAudio = useCallback((stream: MediaStream) => {
     const AudioContextClass = window.AudioContext ?? (window as typeof window & { webkitAudioContext?: AudioContextConstructor }).webkitAudioContext;
@@ -359,6 +450,8 @@ export default function LivePage() {
     setSegments([]);
     setPcmMetrics(emptyPcmMetrics);
     setVadMetrics(null);
+    setLiveTranscriptUpdates({});
+    setLiveTranscriptMetrics(emptyLiveTranscriptMetrics);
 
     let created: LiveSession | null = null;
     try {
@@ -441,6 +534,7 @@ export default function LivePage() {
     setPartialText("");
     setFinalText("");
     setSegments([]);
+    setLiveTranscriptUpdates({});
   }
 
   useEffect(() => {
@@ -507,6 +601,14 @@ export default function LivePage() {
   }, [stopAudio]);
 
   const canConfigure = ["idle", "completed", "failed"].includes(uiStatus);
+  const semanticSegments = Object.values(liveTranscriptUpdates).sort(
+    (left, right) => left.sequenceStart - right.sequenceStart || left.segmentId.localeCompare(right.segmentId),
+  );
+  const semanticText = (state: TranscriptState) => semanticSegments
+    .filter((segment) => segment.state === state)
+    .map((segment) => segment.text)
+    .filter(Boolean)
+    .join(" ");
   const canStart = canConfigure && !modelsLoading && Boolean(model)
     && availableModels.some((item) => item.model === model);
   return (
@@ -542,22 +644,34 @@ export default function LivePage() {
           <div><span>Silence skipped / speech</span><strong>{(vadMetrics.silenceDurationSkippedMs / 1000).toFixed(1)}s / {(vadMetrics.speechDurationProcessedMs / 1000).toFixed(1)}s</strong></div>
           <div><span>Average segment / VAD</span><strong>{vadMetrics.averageSegmentDurationMs.toFixed(0)}ms / {vadMetrics.vadProcessingLatencyMs.toFixed(3)}ms</strong></div>
         </div> : null}
+        {usesLiveTranscriptState ? <div className="live-status-grid">
+          <div><span>Partial / stable latency</span><strong>{liveTranscriptMetrics.partialLatencyMs.toFixed(0)}ms / {liveTranscriptMetrics.stableLatencyMs.toFixed(0)}ms</strong></div>
+          <div><span>Final latency</span><strong>{liveTranscriptMetrics.finalLatencyMs.toFixed(0)}ms</strong></div>
+          <div><span>Discarded / rejected</span><strong>{liveTranscriptMetrics.discardedDuplicate} / {liveTranscriptMetrics.rejectedOutOfOrder}</strong></div>
+          <div><span>Finalized segments</span><strong>{liveTranscriptMetrics.finalizedSegments}</strong></div>
+        </div> : null}
         <div className="live-controls">
           <button disabled={!canStart} onClick={start} type="button">Start</button>
           <button className="secondary" disabled={!(["active", "paused"] as UiStatus[]).includes(uiStatus)} onClick={pauseOrResume} type="button">{uiStatus === "paused" ? "Resume" : "Pause"}</button>
           <button className="danger" disabled={!(["active", "paused"] as UiStatus[]).includes(uiStatus)} onClick={stop} type="button">Stop</button>
-          <button className="secondary" disabled={!partialText && !finalText && segments.length === 0} onClick={clearTranscript} type="button">Clear transcript</button>
+          <button className="secondary" disabled={!partialText && !finalText && segments.length === 0 && semanticSegments.length === 0} onClick={clearTranscript} type="button">Clear transcript</button>
         </div>
         {error ? <p className="error-callout" role="alert">{error}</p> : null}
         {session ? <p className="live-session-link">Session <Link href={`/live/${session.session_id}`}>{session.session_id}</Link></p> : null}
       </section>
 
-      <section className="live-transcript-grid">
+      {usesLiveTranscriptState ? <section className="live-transcript-grid">
+        <article><div className="live-transcript-heading"><h2>Partial transcript</h2><span>Mutable</span></div><div className="transcript-text">{semanticText("partial") || "No partial segment is active."}</div></article>
+        <article><div className="live-transcript-heading"><h2>Stable transcript</h2><span>Growing</span></div><div className="transcript-text">{semanticText("stable") || "No stable segment is active."}</div></article>
+        <article><div className="live-transcript-heading"><h2>Final transcript</h2><span>Immutable</span></div><div className="transcript-text">{semanticText("final") || "Finalized segments will appear here."}</div></article>
+      </section> : <section className="live-transcript-grid">
         <article><div className="live-transcript-heading"><h2>Partial transcript</h2><span>{connection === "processing" ? "Processing chunk…" : "Live"}</span></div><div className="transcript-text">{partialText || "Partial transcription will appear here."}</div></article>
         <article><div className="live-transcript-heading"><h2>Final transcript</h2><span>{session?.status ?? "Pending"}</span></div><div className="transcript-text">{finalText || "Stop the session to finalize the transcript."}</div></article>
-      </section>
+      </section>}
 
-      {segments.length > 0 ? <section className="live-segments"><h2>Segments</h2>{segments.map((segment, index) => <article className="segment-row" key={segment.id ?? `${segment.start}-${index}`}><span>{segment.start.toFixed(2)}s → {segment.end.toFixed(2)}s</span><p>{segment.text}</p></article>)}</section> : null}
+      {usesLiveTranscriptState && semanticSegments.length > 0 ? <section className="live-segments"><h2>Semantic segments</h2>{semanticSegments.map((segment) => <article className="segment-row" key={segment.segmentId}><span>{(segment.startMs / 1000).toFixed(2)}s to {(segment.endMs / 1000).toFixed(2)}s · {segment.state} · r{segment.revision}</span><p>{segment.text}</p></article>)}</section> : null}
+
+      {!usesLiveTranscriptState && segments.length > 0 ? <section className="live-segments"><h2>Segments</h2>{segments.map((segment, index) => <article className="segment-row" key={segment.id ?? `${segment.start}-${index}`}><span>{segment.start.toFixed(2)}s → {segment.end.toFixed(2)}s</span><p>{segment.text}</p></article>)}</section> : null}
     </section>
   );
 }

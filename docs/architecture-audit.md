@@ -149,3 +149,19 @@ state and metrics are isolated per session and runtime-only. Legacy live audio
 bypasses VAD, while both PCM and VAD feature flags remain disabled by default.
 See `docs/stage3-voice-activity-detection.md` for timing defaults, metrics,
 limitations, and validation status.
+
+## Stage 4 addendum
+
+Stage 4 adds a bounded, runtime-only semantic result registry after PCM + VAD
+segment transcription. Each session/segment retains only its newest accepted
+`partial`, `stable`, or immutable `final` revision. WebSocket reconnect returns
+that latest snapshot after the PCM handshake. The UI keys results by segment,
+so final replaces the same partial/stable entry rather than appending a second
+copy. The registry records state latency, revisions, discarded duplicates,
+rejected out-of-order updates, and finalized segment counts.
+
+The new backend and frontend flags are both disabled by default. No MongoDB
+schema, cloud provider, legacy recorder behavior, or default local `base` model
+was changed. Existing Whisper is still window-based rather than true token
+streaming; see `docs/stage4-live-transcription-state.md` for the event contract,
+revision rules, reconnect behavior, UI semantics, and current validation status.

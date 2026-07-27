@@ -38,6 +38,7 @@ class Settings(BaseSettings):
     live_vad_maximum_segment_duration_ms: int = 20_000
     live_vad_segment_overlap_ms: int = 500
     live_vad_webrtc_mode: int = 2
+    live_transcript_state_enabled: bool = False
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

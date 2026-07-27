@@ -7,6 +7,11 @@ from ..config import get_settings
 from ..models.live import CreateLiveSessionRequest, LiveSessionResponse
 from ..security import is_allowed_web_origin
 from ..services.live_processor import process_live_chunk
+from ..services.live_transcript_state import (
+    LiveTranscriptStateRegistry,
+    LiveTranscriptUpdate,
+    TranscriptState,
+)
 from ..services.live_sessions import (
     create_live_session,
     fail_live_session,
@@ -26,7 +31,11 @@ from ..services.pcm_ingestion import (
     PcmIngestionRegistry,
     PcmProtocolError,
 )
-from ..services.pcm_transcription import transcribe_pcm_window
+from ..services.pcm_transcription import (
+    PcmTranscriptionResult,
+    transcribe_pcm_window,
+    transcribe_pcm_window_detailed,
+)
 from ..services.vad import (
     VadConfig,
     VadProcessResult,
@@ -57,6 +66,9 @@ _vad_registry = VadSessionRegistry(
         segment_overlap_ms=_runtime_settings.live_vad_segment_overlap_ms,
     ),
     lambda: WebRtcSpeechDetector(_runtime_settings.live_vad_webrtc_mode),
+    max_sessions=_runtime_settings.live_pcm_max_sessions,
+)
+_live_state_registry = LiveTranscriptStateRegistry(
     max_sessions=_runtime_settings.live_pcm_max_sessions,
 )
 
@@ -171,11 +183,20 @@ async def _transcribe_vad_segments(
 ) -> bool:
     for segment in result.segments:
         try:
-            session, duplicate = await asyncio.to_thread(
-                transcribe_pcm_window,
-                session_id,
-                segment.window,
-            )
+            detailed: PcmTranscriptionResult | None = None
+            if _runtime_settings.live_transcript_state_enabled:
+                detailed = await asyncio.to_thread(
+                    transcribe_pcm_window_detailed,
+                    session_id,
+                    segment.window,
+                )
+                session, duplicate = detailed.session, detailed.duplicate
+            else:
+                session, duplicate = await asyncio.to_thread(
+                    transcribe_pcm_window,
+                    session_id,
+                    segment.window,
+                )
         except Exception as exc:
             failed = await asyncio.to_thread(
                 fail_live_session,
@@ -201,7 +222,40 @@ async def _transcribe_vad_segments(
                 sequenceEnd=segment.window.end_sequence,
             ),
         )
+        if detailed is not None and not detailed.duplicate:
+            await _send_live_transcript_lifecycle(session_id, detailed)
     return True
+
+
+async def _send_live_transcript_lifecycle(
+    session_id: str,
+    result: PcmTranscriptionResult,
+) -> None:
+    common = {
+        "session_id": session_id,
+        "segment_id": result.segment_id,
+        "sequence_start": result.sequence_start,
+        "sequence_end": result.sequence_end,
+        "start_ms": result.start_ms,
+        "end_ms": result.end_ms,
+        "text": result.text,
+        "language": result.session.language,
+        "model": result.session.model,
+        "latency_ms": result.latency_ms,
+    }
+    for revision, state in enumerate(TranscriptState, start=1):
+        update = LiveTranscriptUpdate(revision=revision, state=state, **common)
+        outcome = _live_state_registry.apply(update)
+        if not outcome.accepted:
+            continue
+        await _send_to_current_connection(
+            session_id,
+            _event(
+                "transcript_state",
+                **update.as_dict(),
+                metrics=_live_state_registry.metrics(session_id),
+            ),
+        )
 
 
 async def _schedule_pcm_transcription(session_id: str) -> None:
@@ -231,6 +285,7 @@ async def _finish_pcm_session(session_id: str) -> None:
         _pcm_task_locks.pop(session_id, None)
     _pcm_registry.remove(session_id)
     _vad_registry.remove(session_id)
+    _live_state_registry.remove(session_id)
 
 
 @router.post("/api/live/sessions", response_model=LiveSessionResponse, status_code=status.HTTP_201_CREATED)
@@ -396,6 +451,20 @@ async def live_websocket(websocket: WebSocket, session_id: str) -> None:
                             metrics=metrics,
                         )
                     )
+                    if (
+                        _runtime_settings.live_vad_enabled
+                        and _runtime_settings.live_transcript_state_enabled
+                    ):
+                        await websocket.send_json(
+                            _event(
+                                "transcript_state_snapshot",
+                                updates=[
+                                    update.as_dict()
+                                    for update in _live_state_registry.snapshot(session_id)
+                                ],
+                                metrics=_live_state_registry.metrics(session_id),
+                            )
+                        )
                 elif command_type == "pcm_chunk":
                     if not _runtime_settings.live_pcm_streaming_enabled or not pcm_registered:
                         await websocket.send_json(

@@ -1,4 +1,4 @@
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 
 from bson import ObjectId
 from fastapi import HTTPException, status
@@ -33,7 +33,7 @@ def _serialize_job(document: dict) -> JobResponse:
 
 
 def create_job(payload: CreateJobRequest) -> JobResponse:
-    now = datetime.now(UTC)
+    now = datetime.now(timezone.utc)
     document = {
         **payload.model_dump(),
         "status": JobStatus.QUEUED.value,

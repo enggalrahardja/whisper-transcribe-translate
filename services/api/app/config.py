@@ -39,6 +39,15 @@ class Settings(BaseSettings):
     live_vad_segment_overlap_ms: int = 500
     live_vad_webrtc_mode: int = 2
     live_transcript_state_enabled: bool = False
+    live_accurate_final_enabled: bool = False
+    live_final_model: str = "base"
+    live_final_device: str = "auto"
+    live_final_compute_type: str = "auto"
+    live_final_beam_size: int = 5
+    live_final_timeout_seconds: float = 30.0
+    live_final_max_retries: int = 1
+    live_final_worker_concurrency: int = 1
+    live_final_queue_capacity: int = 128
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

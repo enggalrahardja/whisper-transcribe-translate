@@ -9,7 +9,7 @@ from pymongo.errors import PyMongoError
 from .config import get_settings
 from .database import close_database, get_database
 from .routes.jobs import router as jobs_router
-from .routes.live import router as live_router
+from .routes.live import router as live_router, shutdown_final_transcription_queue
 from .routes.settings import router as settings_router
 from .routes.subtitles import router as subtitles_router
 from .routes.uploads import router as uploads_router
@@ -41,6 +41,7 @@ async def lifespan(_: FastAPI):
         ensure_whisper_model_registry()
         yield
     finally:
+        await shutdown_final_transcription_queue()
         close_database()
 
 

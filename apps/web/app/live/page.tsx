@@ -34,6 +34,39 @@ type LiveTranscriptMetrics = {
   rejectedOutOfOrder: number;
   finalizedSegments: number;
 };
+type FinalCorrectionStatus = "pending" | "processing" | "completed" | "failed";
+type FinalCorrection = {
+  jobId: string;
+  sessionId: string;
+  segmentId: string;
+  status: FinalCorrectionStatus;
+  attempt: number;
+  text?: string | null;
+  metadata?: {
+    model: string;
+    checkpointPath: string;
+    checkpointSha256: string;
+    device: string;
+    computeType: string;
+    language: string;
+    beamSize: number;
+    timestamps: Array<{ startMs: number; endMs: number; text: string }>;
+    latencyMs: number;
+  } | null;
+  error?: string | null;
+  update?: LiveTranscriptUpdate;
+};
+type FinalCorrectionMetrics = {
+  queuedFinalJobs: number;
+  processingLatencyMs: number;
+  completed: number;
+  failed: number;
+  retries: number;
+  timeoutCount: number;
+  queueDepth: number;
+  modelLoadTimeMs: number;
+  finalReplacementCount: number;
+};
 type VadRuntimeMetrics = {
   state: "idle" | "speech_started" | "speech_active" | "speech_ended";
   speechSegments: number;
@@ -75,6 +108,17 @@ const emptyLiveTranscriptMetrics: LiveTranscriptMetrics = {
   discardedDuplicate: 0,
   rejectedOutOfOrder: 0,
   finalizedSegments: 0,
+};
+const emptyFinalCorrectionMetrics: FinalCorrectionMetrics = {
+  queuedFinalJobs: 0,
+  processingLatencyMs: 0,
+  completed: 0,
+  failed: 0,
+  retries: 0,
+  timeoutCount: 0,
+  queueDepth: 0,
+  modelLoadTimeMs: 0,
+  finalReplacementCount: 0,
 };
 
 const defaultLiveSettings = {
@@ -157,6 +201,8 @@ export default function LivePage() {
   const [vadMetrics, setVadMetrics] = useState<VadRuntimeMetrics | null>(null);
   const [liveTranscriptUpdates, setLiveTranscriptUpdates] = useState<Record<string, LiveTranscriptUpdate>>({});
   const [liveTranscriptMetrics, setLiveTranscriptMetrics] = useState<LiveTranscriptMetrics>(emptyLiveTranscriptMetrics);
+  const [finalCorrections, setFinalCorrections] = useState<Record<string, FinalCorrection>>({});
+  const [finalCorrectionMetrics, setFinalCorrectionMetrics] = useState<FinalCorrectionMetrics>(emptyFinalCorrectionMetrics);
 
   const socketRef = useRef<WebSocket | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -282,6 +328,8 @@ export default function LivePage() {
         metrics?: Record<string, number>;
         state?: VadRuntimeMetrics["state"] | TranscriptState;
         updates?: LiveTranscriptUpdate[];
+        jobs?: FinalCorrection[];
+        jobId?: string;
         sessionId?: string;
         segmentId?: string;
         revision?: number;
@@ -293,6 +341,10 @@ export default function LivePage() {
         language?: string;
         model?: string;
         latencyMs?: number;
+        attempt?: number;
+        update?: LiveTranscriptUpdate;
+        metadata?: FinalCorrection["metadata"];
+        error?: string | null;
       };
       if (event.type === "processing") setConnection("processing");
       if (event.type === "connected") setConnection("connected");
@@ -342,6 +394,43 @@ export default function LivePage() {
           discardedDuplicate: event.metrics.discarded_duplicate ?? 0,
           rejectedOutOfOrder: event.metrics.rejected_out_of_order ?? 0,
           finalizedSegments: event.metrics.finalized_segments ?? 0,
+        });
+      }
+      if (event.type === "final_correction_snapshot" && event.jobs) {
+        setFinalCorrections(Object.fromEntries(
+          event.jobs
+            .filter((job) => job.sessionId === sessionIdRef.current)
+            .map((job) => [job.segmentId, job]),
+        ));
+      }
+      if (
+        event.type === "final_correction" && event.sessionId && event.segmentId
+        && event.status && ["pending", "processing", "completed", "failed"].includes(event.status)
+      ) {
+        const correction = event as FinalCorrection & { type: string };
+        setFinalCorrections((current) => ({
+          ...current,
+          [correction.segmentId]: correction,
+        }));
+        if (correction.status === "completed" && correction.update) {
+          setLiveTranscriptUpdates((currentUpdates) => {
+            const current = currentUpdates[correction.segmentId];
+            if (!current || correction.update!.revision !== current.revision + 1) return currentUpdates;
+            return { ...currentUpdates, [correction.segmentId]: correction.update! };
+          });
+        }
+      }
+      if ((event.type === "final_correction" || event.type === "final_correction_snapshot") && event.metrics) {
+        setFinalCorrectionMetrics({
+          queuedFinalJobs: event.metrics.queued_final_jobs ?? 0,
+          processingLatencyMs: event.metrics.processing_latency_ms ?? 0,
+          completed: event.metrics.completed ?? 0,
+          failed: event.metrics.failed ?? 0,
+          retries: event.metrics.retries ?? 0,
+          timeoutCount: event.metrics.timeout_count ?? 0,
+          queueDepth: event.metrics.queue_depth ?? 0,
+          modelLoadTimeMs: event.metrics.model_load_time_ms ?? 0,
+          finalReplacementCount: event.metrics.final_replacement_count ?? 0,
         });
       }
       if (event.type === "error") {
@@ -452,6 +541,8 @@ export default function LivePage() {
     setVadMetrics(null);
     setLiveTranscriptUpdates({});
     setLiveTranscriptMetrics(emptyLiveTranscriptMetrics);
+    setFinalCorrections({});
+    setFinalCorrectionMetrics(emptyFinalCorrectionMetrics);
 
     let created: LiveSession | null = null;
     try {
@@ -535,6 +626,7 @@ export default function LivePage() {
     setFinalText("");
     setSegments([]);
     setLiveTranscriptUpdates({});
+    setFinalCorrections({});
   }
 
   useEffect(() => {
@@ -609,6 +701,7 @@ export default function LivePage() {
     .map((segment) => segment.text)
     .filter(Boolean)
     .join(" ");
+  const hasFinalCorrections = Object.keys(finalCorrections).length > 0;
   const canStart = canConfigure && !modelsLoading && Boolean(model)
     && availableModels.some((item) => item.model === model);
   return (
@@ -650,6 +743,13 @@ export default function LivePage() {
           <div><span>Discarded / rejected</span><strong>{liveTranscriptMetrics.discardedDuplicate} / {liveTranscriptMetrics.rejectedOutOfOrder}</strong></div>
           <div><span>Finalized segments</span><strong>{liveTranscriptMetrics.finalizedSegments}</strong></div>
         </div> : null}
+        {hasFinalCorrections ? <div className="live-status-grid">
+          <div><span>Final jobs / queue</span><strong>{finalCorrectionMetrics.queuedFinalJobs} / {finalCorrectionMetrics.queueDepth}</strong></div>
+          <div><span>Completed / failed</span><strong>{finalCorrectionMetrics.completed} / {finalCorrectionMetrics.failed}</strong></div>
+          <div><span>Retries / timeouts</span><strong>{finalCorrectionMetrics.retries} / {finalCorrectionMetrics.timeoutCount}</strong></div>
+          <div><span>Processing / model load</span><strong>{finalCorrectionMetrics.processingLatencyMs.toFixed(0)}ms / {finalCorrectionMetrics.modelLoadTimeMs.toFixed(0)}ms</strong></div>
+          <div><span>Final replacements</span><strong>{finalCorrectionMetrics.finalReplacementCount}</strong></div>
+        </div> : null}
         <div className="live-controls">
           <button disabled={!canStart} onClick={start} type="button">Start</button>
           <button className="secondary" disabled={!(["active", "paused"] as UiStatus[]).includes(uiStatus)} onClick={pauseOrResume} type="button">{uiStatus === "paused" ? "Resume" : "Pause"}</button>
@@ -669,7 +769,10 @@ export default function LivePage() {
         <article><div className="live-transcript-heading"><h2>Final transcript</h2><span>{session?.status ?? "Pending"}</span></div><div className="transcript-text">{finalText || "Stop the session to finalize the transcript."}</div></article>
       </section>}
 
-      {usesLiveTranscriptState && semanticSegments.length > 0 ? <section className="live-segments"><h2>Semantic segments</h2>{semanticSegments.map((segment) => <article className="segment-row" key={segment.segmentId}><span>{(segment.startMs / 1000).toFixed(2)}s to {(segment.endMs / 1000).toFixed(2)}s · {segment.state} · r{segment.revision}</span><p>{segment.text}</p></article>)}</section> : null}
+      {usesLiveTranscriptState && semanticSegments.length > 0 ? <section className="live-segments"><h2>Semantic segments</h2>{semanticSegments.map((segment) => {
+        const correction = finalCorrections[segment.segmentId];
+        return <article className="segment-row" key={segment.segmentId}><span>{(segment.startMs / 1000).toFixed(2)}s to {(segment.endMs / 1000).toFixed(2)}s · {segment.state} · r{segment.revision}{correction ? ` · accurate final: ${correction.status}` : ""}</span><p>{segment.text}</p>{correction?.status === "failed" ? <small>{correction.error ?? "Accurate final failed; live result retained."}</small> : null}{correction?.status === "completed" && correction.metadata ? <small>{correction.metadata.model} · {correction.metadata.device}/{correction.metadata.computeType} · beam {correction.metadata.beamSize}</small> : null}</article>;
+      })}</section> : null}
 
       {!usesLiveTranscriptState && segments.length > 0 ? <section className="live-segments"><h2>Segments</h2>{segments.map((segment, index) => <article className="segment-row" key={segment.id ?? `${segment.start}-${index}`}><span>{segment.start.toFixed(2)}s → {segment.end.toFixed(2)}s</span><p>{segment.text}</p></article>)}</section> : null}
     </section>

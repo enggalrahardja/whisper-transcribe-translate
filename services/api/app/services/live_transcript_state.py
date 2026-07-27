@@ -147,6 +147,31 @@ class LiveTranscriptStateRegistry:
                 key=lambda item: (item.sequence_start, item.sequence_end, item.segment_id),
             )
 
+    def latest(self, session_id: str, segment_id: str) -> LiveTranscriptUpdate | None:
+        with self._lock:
+            return self._sessions.get(session_id, {}).get(segment_id)
+
+    def replace_with_accurate_final(
+        self,
+        update: LiveTranscriptUpdate,
+    ) -> UpdateOutcome:
+        """Controlled Stage 5 replacement; normal final updates remain immutable."""
+        update.validate()
+        with self._lock:
+            current = self._sessions.get(update.session_id, {}).get(update.segment_id)
+            if current is None:
+                return UpdateOutcome(False, "live_result_missing", update)
+            if update.state is not TranscriptState.FINAL:
+                return UpdateOutcome(False, "accurate_result_must_be_final", current)
+            if update.revision != current.revision + 1:
+                self._metrics[update.session_id].rejected_out_of_order += 1
+                return UpdateOutcome(False, "out_of_order", current)
+            self._sessions[update.session_id][update.segment_id] = update
+            metrics = self._metrics[update.session_id]
+            metrics.latency_totals[TranscriptState.FINAL] += update.latency_ms
+            metrics.latency_counts[TranscriptState.FINAL] += 1
+            return UpdateOutcome(True, "accurate_final_replacement", update)
+
     def metrics(self, session_id: str) -> dict[str, object]:
         with self._lock:
             metrics = self._metrics.get(session_id, _Metrics())

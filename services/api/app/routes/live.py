@@ -7,6 +7,14 @@ from ..config import get_settings
 from ..models.live import CreateLiveSessionRequest, LiveSessionResponse
 from ..security import is_allowed_web_origin
 from ..services.live_processor import process_live_chunk
+from ..services.final_transcription import (
+    FinalJobSnapshot,
+    FinalJobStatus,
+    FinalTranscriptionConfig,
+    FinalTranscriptionRequest,
+    LocalFinalTranscriptionQueue,
+    PersistentLocalFinalTranscriber,
+)
 from ..services.live_transcript_state import (
     LiveTranscriptStateRegistry,
     LiveTranscriptUpdate,
@@ -27,6 +35,7 @@ from ..services.pcm_ingestion import (
     MIN_CHUNK_DURATION_MS,
     PCM_CHANNEL_COUNT,
     PCM_SAMPLE_RATE,
+    PcmAudioWindow,
     PcmChunkMetadata,
     PcmIngestionRegistry,
     PcmProtocolError,
@@ -35,6 +44,7 @@ from ..services.pcm_transcription import (
     PcmTranscriptionResult,
     transcribe_pcm_window,
     transcribe_pcm_window_detailed,
+    pcm_window_to_wav,
 )
 from ..services.vad import (
     VadConfig,
@@ -71,6 +81,32 @@ _vad_registry = VadSessionRegistry(
 _live_state_registry = LiveTranscriptStateRegistry(
     max_sessions=_runtime_settings.live_pcm_max_sessions,
 )
+_final_queue: LocalFinalTranscriptionQueue | None = None
+
+
+def _get_final_queue() -> LocalFinalTranscriptionQueue:
+    global _final_queue
+    if _final_queue is None:
+        config = FinalTranscriptionConfig(
+            model=_runtime_settings.live_final_model,
+            device=_runtime_settings.live_final_device,
+            compute_type=_runtime_settings.live_final_compute_type,
+            beam_size=_runtime_settings.live_final_beam_size,
+            timeout_seconds=_runtime_settings.live_final_timeout_seconds,
+            max_retries=_runtime_settings.live_final_max_retries,
+            worker_concurrency=_runtime_settings.live_final_worker_concurrency,
+            queue_capacity=_runtime_settings.live_final_queue_capacity,
+        )
+        transcriber = PersistentLocalFinalTranscriber(config)
+        _final_queue = LocalFinalTranscriptionQueue(config, transcriber)
+    return _final_queue
+
+
+async def shutdown_final_transcription_queue() -> None:
+    global _final_queue
+    queue, _final_queue = _final_queue, None
+    if queue is not None:
+        await queue.close()
 
 
 def _event(event_type: str, session: LiveSessionResponse | None = None, **extra: object) -> dict:
@@ -224,6 +260,8 @@ async def _transcribe_vad_segments(
         )
         if detailed is not None and not detailed.duplicate:
             await _send_live_transcript_lifecycle(session_id, detailed)
+            if _runtime_settings.live_accurate_final_enabled:
+                await _enqueue_accurate_final(session_id, detailed, segment.window)
     return True
 
 
@@ -258,6 +296,94 @@ async def _send_live_transcript_lifecycle(
         )
 
 
+async def _enqueue_accurate_final(
+    session_id: str,
+    live_result: PcmTranscriptionResult,
+    window: PcmAudioWindow,
+) -> None:
+    if not _runtime_settings.live_transcript_state_enabled:
+        await _send_to_current_connection(
+            session_id,
+            _event(
+                "final_correction",
+                sessionId=session_id,
+                segmentId=live_result.segment_id,
+                status=FinalJobStatus.FAILED.value,
+                error="Accurate final transcription requires live transcript state",
+            ),
+        )
+        return
+    queue = _get_final_queue()
+    request = FinalTranscriptionRequest(
+        session_id=session_id,
+        segment_id=live_result.segment_id,
+        sequence_start=live_result.sequence_start,
+        sequence_end=live_result.sequence_end,
+        start_ms=live_result.start_ms,
+        end_ms=live_result.end_ms,
+        language=live_result.session.language,
+        audio_wav=pcm_window_to_wav(window),
+    )
+    try:
+        snapshot, duplicate = await queue.enqueue(request, _handle_final_job_status)
+    except asyncio.QueueFull as exc:
+        await _send_to_current_connection(
+            session_id,
+            _event(
+                "final_correction",
+                sessionId=session_id,
+                segmentId=live_result.segment_id,
+                status=FinalJobStatus.FAILED.value,
+                error=str(exc),
+                metrics=queue.metrics(),
+            ),
+        )
+        return
+    if duplicate:
+        await _send_to_current_connection(
+            session_id,
+            _event(
+                "final_correction",
+                **snapshot.as_dict(),
+                duplicate=True,
+                metrics=queue.metrics(),
+            ),
+        )
+
+
+async def _handle_final_job_status(snapshot: FinalJobSnapshot) -> None:
+    queue = _get_final_queue()
+    payload = snapshot.as_dict()
+    if snapshot.status is FinalJobStatus.COMPLETED and snapshot.result is not None:
+        current = _live_state_registry.latest(snapshot.session_id, snapshot.segment_id)
+        if current is not None:
+            corrected = LiveTranscriptUpdate(
+                session_id=current.session_id,
+                segment_id=current.segment_id,
+                revision=current.revision + 1,
+                state=TranscriptState.FINAL,
+                sequence_start=current.sequence_start,
+                sequence_end=current.sequence_end,
+                start_ms=current.start_ms,
+                end_ms=current.end_ms,
+                text=snapshot.result.text,
+                language=snapshot.result.metadata.language,
+                model=snapshot.result.metadata.model,
+                latency_ms=snapshot.result.metadata.latency_ms,
+            )
+            outcome = _live_state_registry.replace_with_accurate_final(corrected)
+            if outcome.accepted:
+                queue.record_replacement()
+                payload["update"] = corrected.as_dict()
+            else:
+                payload["status"] = FinalJobStatus.FAILED.value
+                payload["error"] = outcome.reason
+    await _send_to_current_connection(
+        snapshot.session_id,
+        _event("final_correction", **payload, metrics=queue.metrics()),
+    )
+
+
 async def _schedule_pcm_transcription(session_id: str) -> None:
     target_ms = (
         10
@@ -285,7 +411,8 @@ async def _finish_pcm_session(session_id: str) -> None:
         _pcm_task_locks.pop(session_id, None)
     _pcm_registry.remove(session_id)
     _vad_registry.remove(session_id)
-    _live_state_registry.remove(session_id)
+    if not _runtime_settings.live_accurate_final_enabled:
+        _live_state_registry.remove(session_id)
 
 
 @router.post("/api/live/sessions", response_model=LiveSessionResponse, status_code=status.HTTP_201_CREATED)
@@ -463,6 +590,17 @@ async def live_websocket(websocket: WebSocket, session_id: str) -> None:
                                     for update in _live_state_registry.snapshot(session_id)
                                 ],
                                 metrics=_live_state_registry.metrics(session_id),
+                            )
+                        )
+                    if _runtime_settings.live_accurate_final_enabled and _final_queue is not None:
+                        await websocket.send_json(
+                            _event(
+                                "final_correction_snapshot",
+                                jobs=[
+                                    job.as_dict()
+                                    for job in _final_queue.snapshot(session_id)
+                                ],
+                                metrics=_final_queue.metrics(),
                             )
                         )
                 elif command_type == "pcm_chunk":

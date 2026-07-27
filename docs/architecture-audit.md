@@ -165,3 +165,20 @@ schema, cloud provider, legacy recorder behavior, or default local `base` model
 was changed. Existing Whisper is still window-based rather than true token
 streaming; see `docs/stage4-live-transcription-state.md` for the event contract,
 revision rules, reconnect behavior, UI semantics, and current validation status.
+
+## Stage 5 addendum
+
+Stage 5 forks each complete VAD speech segment after the live transcription
+result: the existing live path returns immediately, while a bounded local queue
+can reprocess the same full audio with a separately configurable, persistent
+Whisper model runtime. Jobs are idempotent by session/segment, have bounded
+retry/timeout/concurrency, and expose pending/processing/completed/failed state.
+
+A completed job performs a controlled next-revision replacement of the same
+semantic `segmentId`. Failed jobs preserve the live final. Exact verified
+checkpoint SHA-256/path, model, effective device/compute type, language, beam
+size, timestamps, latency, job state, and queue metrics remain runtime-only.
+The feature is disabled by default; the legacy route, local live `base` default,
+MongoDB schemas, translation, diarization, and provider set are unchanged. See
+`docs/stage5-accurate-final-transcription.md` for configuration, lifecycle,
+failure semantics, metadata, and E2E limitations.

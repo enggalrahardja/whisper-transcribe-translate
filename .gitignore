@@ -1,5 +1,23 @@
-__pycache__/
+**/__pycache__/
 *.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
 
 .local-portaudio/
 assets/config/*.json
+
+node_modules/
+apps/web/node_modules/
+apps/web/.next/
+apps/web/next-env.d.ts
+**/*.tsbuildinfo
+
+/apps/web/package-lock.json
+/apps/web/pnpm-lock.yaml
+
+/services/api/.venv/
+/services/api/.env
+/services/api/storage/
+
+storage/

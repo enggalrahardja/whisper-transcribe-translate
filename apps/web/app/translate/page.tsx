@@ -3,21 +3,16 @@
 import { useRouter } from "next/navigation";
 import { FormEvent, useEffect, useState } from "react";
 import { apiBaseUrl, ApplicationSettings, formatBytes } from "../lib/api";
-import { sourceLanguages } from "../lib/languages";
+import { languageLabel, sourceLanguages, targetLanguages } from "../lib/languages";
 
-type CreatedJob = {
-  id: string;
-  file_name: string;
-  status: string;
-};
-
-export default function TranscribePage() {
+export default function TranslatePage() {
   const router = useRouter();
   const [file, setFile] = useState<File | null>(null);
-  const [language, setLanguage] = useState("auto");
+  const [sourceLanguage, setSourceLanguage] = useState("auto");
+  const [targetLanguage, setTargetLanguage] = useState("english");
   const [model, setModel] = useState("base");
   const [submitting, setSubmitting] = useState(false);
-  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
 
   useEffect(() => {
     const controller = new AbortController();
@@ -25,7 +20,8 @@ export default function TranscribePage() {
       .then((response) => response.ok ? response.json() : null)
       .then((settings: ApplicationSettings | null) => {
         if (!settings) return;
-        setLanguage(settings.general.default_language);
+        setSourceLanguage(settings.general.default_language);
+        setTargetLanguage(settings.translation.default_target_language);
         setModel(settings.general.default_whisper_model);
       }).catch(() => undefined);
     return () => controller.abort();
@@ -34,33 +30,30 @@ export default function TranscribePage() {
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (!file) {
-      setMessage("Pilih file audio atau video terlebih dahulu.");
+      setError("Select an audio or video file first.");
+      return;
+    }
+    if (!targetLanguage) {
+      setError("Target language is required.");
       return;
     }
 
     setSubmitting(true);
-    setMessage("");
-
+    setError("");
     const body = new FormData();
     body.append("file", file);
-    body.append("language", language);
+    body.append("language", sourceLanguage);
+    body.append("target_language", targetLanguage);
     body.append("model", model);
-    body.append("task", "transcribe");
+    body.append("task", "translate");
 
     try {
-      const response = await fetch(`${apiBaseUrl}/api/uploads`, {
-        method: "POST",
-        body,
-      });
+      const response = await fetch(`${apiBaseUrl}/api/uploads`, { method: "POST", body });
       const result = await response.json();
-      if (!response.ok) {
-        throw new Error(result.detail ?? "Upload gagal");
-      }
-
-      const job = result as CreatedJob;
-      router.push(`/jobs/${job.id}`);
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Upload gagal");
+      if (!response.ok) throw new Error(result.detail ?? "Upload failed");
+      router.push(`/jobs/${result.id}`);
+    } catch (uploadError) {
+      setError(uploadError instanceof Error ? uploadError.message : "Upload failed");
     } finally {
       setSubmitting(false);
     }
@@ -69,36 +62,41 @@ export default function TranscribePage() {
   return (
     <section className="transcribe-page">
       <section className="transcribe-card">
-        <p className="eyebrow">TRANSCRIBE AUDIO</p>
-        <h1>Upload audio atau video</h1>
-        <p>File akan disimpan lokal dan dibuat sebagai job transcription di MongoDB.</p>
+        <p className="eyebrow">TRANSLATE AUDIO</p>
+        <h1>Upload audio or video</h1>
+        <p>Whisper will transcribe the media first, then translate the transcript into your target language.</p>
 
-        <form onSubmit={submit} className="upload-form">
+        <form className="upload-form" onSubmit={submit}>
           <label className={`upload-dropzone ${submitting ? "disabled" : ""}`}>
-            <strong>{file ? file.name : "Pilih file media"}</strong>
+            <strong>{file ? file.name : "Choose a media file"}</strong>
             <span>WAV, MP3, OGG, FLAC, M4A, MP4, MOV, WMV, AVI, MKV</span>
             <input
               accept="audio/*,video/*"
-              name="file"
               disabled={submitting}
+              name="file"
               onChange={(event) => {
                 setFile(event.target.files?.[0] ?? null);
-                setMessage("");
+                setError("");
               }}
               type="file"
             />
           </label>
 
-          <div className="upload-options">
+          <div className="upload-options translate-options">
             <label>
-              Bahasa
-              <select disabled={submitting} onChange={(event) => setLanguage(event.target.value)} value={language}>
+              Source language
+              <select disabled={submitting} onChange={(event) => setSourceLanguage(event.target.value)} value={sourceLanguage}>
                 {sourceLanguages.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
               </select>
             </label>
-
             <label>
-              Whisper Model
+              Target language
+              <select disabled={submitting} onChange={(event) => setTargetLanguage(event.target.value)} required value={targetLanguage}>
+                {targetLanguages.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+              </select>
+            </label>
+            <label>
+              Whisper model
               <select disabled={submitting} onChange={(event) => setModel(event.target.value)} value={model}>
                 <option value="tiny">Tiny</option>
                 <option value="base">Base</option>
@@ -113,17 +111,18 @@ export default function TranscribePage() {
             <dl className="upload-summary">
               <div><dt>File</dt><dd>{file.name}</dd></div>
               <div><dt>Size</dt><dd>{formatBytes(file.size)}</dd></div>
+              <div><dt>Source language</dt><dd>{languageLabel(sourceLanguage)}</dd></div>
+              <div><dt>Target language</dt><dd>{languageLabel(targetLanguage)}</dd></div>
               <div><dt>Model</dt><dd>{model}</dd></div>
-              <div><dt>Language</dt><dd>{language === "auto" ? "Auto Detect" : language}</dd></div>
             </dl>
           ) : null}
 
           <button disabled={submitting} type="submit">
-            {submitting ? "Uploading..." : "Upload & Create Job"}
+            {submitting ? "Uploading…" : "Upload & Create Translation Job"}
           </button>
         </form>
 
-        {message ? <p className="upload-message upload-error" role="alert">{message}</p> : null}
+        {error ? <p className="upload-message upload-error" role="alert">{error}</p> : null}
       </section>
     </section>
   );

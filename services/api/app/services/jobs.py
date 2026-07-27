@@ -26,25 +26,46 @@ def _serialize_job(document: dict) -> JobResponse:
         task=document["task"],
         status=document["status"],
         progress=document.get("progress", 0),
+        file_size=document.get("file_size"),
+        content_type=document.get("content_type"),
         error=document.get("error"),
         created_at=document["created_at"],
         updated_at=document["updated_at"],
     )
 
 
-def create_job(payload: CreateJobRequest) -> JobResponse:
+def _insert_job(document: dict) -> JobResponse:
     now = datetime.now(timezone.utc)
-    document = {
-        **payload.model_dump(),
-        "status": JobStatus.QUEUED.value,
-        "progress": 0,
-        "error": None,
-        "created_at": now,
-        "updated_at": now,
-    }
+    document.update(
+        status=JobStatus.QUEUED.value,
+        progress=0,
+        error=None,
+        created_at=now,
+        updated_at=now,
+    )
     result = get_database()[COLLECTION_NAME].insert_one(document)
     document["_id"] = result.inserted_id
     return _serialize_job(document)
+
+
+def create_job(payload: CreateJobRequest) -> JobResponse:
+    return _insert_job(payload.model_dump())
+
+
+def create_uploaded_job(
+    media: dict[str, str | int],
+    language: str,
+    model: str,
+    task: str,
+) -> JobResponse:
+    return _insert_job(
+        {
+            **media,
+            "language": language,
+            "model": model,
+            "task": task,
+        }
+    )
 
 
 def list_jobs(limit: int = 20) -> list[JobResponse]:

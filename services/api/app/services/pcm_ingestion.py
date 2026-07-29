@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import re
 from math import isfinite
 from collections import deque
 from dataclasses import dataclass, field
@@ -32,6 +33,18 @@ class PcmChunkMetadata:
 
     @classmethod
     def from_payload(cls, payload: dict[str, Any]) -> "PcmChunkMetadata":
+        required = {"sessionId", "sequence", "captureTimestampMs", "sampleRate", "channelCount", "chunkDurationMs", "byteLength"}
+        allowed = required | {"type"}
+        if set(payload) - allowed or not required.issubset(payload):
+            raise PcmProtocolError("PCM chunk metadata has missing or unsupported fields")
+        if not isinstance(payload["sessionId"], str) or not re.fullmatch(r"[a-f0-9]{32}", payload["sessionId"]):
+            raise PcmProtocolError("sessionId must be a 32-character lowercase hexadecimal identifier")
+        integer_fields = ("sequence", "sampleRate", "channelCount", "byteLength")
+        if any(not isinstance(payload[name], int) or isinstance(payload[name], bool) for name in integer_fields):
+            raise PcmProtocolError("PCM integer metadata fields must use exact integers")
+        numeric_fields = ("captureTimestampMs", "chunkDurationMs")
+        if any(not isinstance(payload[name], (int, float)) or isinstance(payload[name], bool) for name in numeric_fields):
+            raise PcmProtocolError("PCM timestamp and duration must be numeric")
         try:
             metadata = cls(
                 session_id=str(payload["sessionId"]),
@@ -69,7 +82,7 @@ class PcmChunkMetadata:
             * self.chunk_duration_ms
             / 1000
         )
-        if self.byte_length <= 0 or abs(self.byte_length - expected_bytes) > PCM_SAMPLE_WIDTH_BYTES:
+        if self.byte_length <= 0 or self.byte_length % PCM_SAMPLE_WIDTH_BYTES or self.byte_length != expected_bytes:
             raise PcmProtocolError(
                 f"byteLength {self.byte_length} does not match {self.chunk_duration_ms:g} ms PCM16 audio"
             )

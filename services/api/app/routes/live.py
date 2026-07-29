@@ -3,13 +3,19 @@ import hashlib
 import json
 import platform
 from datetime import datetime, timezone
+from time import monotonic
 
-from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
 from pydantic import BaseModel, Field
 
 from ..config import get_settings
 from ..models.live import CreateLiveSessionRequest, LiveSessionResponse
-from ..security import is_allowed_web_origin
+from ..security import (
+    Principal, authorize_owner, enforce_concurrent_limit, is_allowed_web_origin,
+    rate_limiter, rate_limit_or_raise, require_admin, require_principal,
+    safe_error, validate_audio_frame_size, websocket_idle_expired, websocket_principal,
+)
+from ..services.production_hardening import audit_event
 from ..services.live_processor import process_live_chunk
 from ..services.final_transcription import (
     FinalJobSnapshot,
@@ -73,8 +79,10 @@ from ..services.pipeline_persistence import (
 from ..services.pipeline_monitoring import latency_summary, quality_indicators, redact_metrics, resource_metrics, warnings_for
 from ..services.live_sessions import (
     create_live_session,
+    count_active_sessions,
     fail_live_session,
     get_live_session,
+    get_live_session_owner,
     list_live_sessions,
     pause_live_session,
     record_disconnect,
@@ -110,7 +118,7 @@ _connections_lock = asyncio.Lock()
 _pcm_tasks: dict[str, asyncio.Task[None]] = {}
 _pcm_task_locks: dict[str, asyncio.Lock] = {}
 _pcm_task_registry_lock = asyncio.Lock()
-MAX_LIVE_CHUNK_BYTES = 10 * 1024 * 1024
+_reconnect_attempts: dict[str, int] = {}
 _runtime_settings = get_settings()
 _pcm_registry = PcmIngestionRegistry(
     max_buffer_seconds=_runtime_settings.live_pcm_max_buffer_seconds,
@@ -143,6 +151,14 @@ _persistence_service: PipelinePersistenceService | None = None
 _segment_glossaries: dict[
     tuple[str, str], GlossarySnapshot | DisabledGlossarySnapshot | None
 ] = {}
+
+
+def _enforce_rate(category: str, principal: Principal, limit: int, *, session_id: str | None = None) -> None:
+    try:
+        rate_limit_or_raise(category, principal.user_id, limit)
+    except HTTPException:
+        audit_event("rate_limit_rejection", principal=principal, session_id=session_id, outcome="rejected", metadata={"category": category})
+        raise
 
 
 def _get_glossary_manager() -> GlossaryManager:
@@ -1108,8 +1124,16 @@ async def _finish_pcm_session(session_id: str) -> None:
 
 
 @router.post("/api/live/sessions", response_model=LiveSessionResponse, status_code=status.HTTP_201_CREATED)
-async def create_session(payload: CreateLiveSessionRequest) -> LiveSessionResponse:
-    session = create_live_session(payload)
+async def create_session(payload: CreateLiveSessionRequest, principal: Principal = Depends(require_principal)) -> LiveSessionResponse:
+    _enforce_rate("session_create", principal, _runtime_settings.rate_session_create_per_minute)
+    try:
+        enforce_concurrent_limit(count_active_sessions(), _runtime_settings.limit_concurrent_sessions)
+        enforce_concurrent_limit(count_active_sessions(owner_id=principal.user_id), _runtime_settings.limit_concurrent_sessions)
+    except HTTPException:
+        audit_event("rate_limit_rejection", principal=principal, outcome="rejected", metadata={"category": "concurrent_sessions"})
+        raise
+    session = create_live_session(payload, owner_id=principal.user_id)
+    audit_event("session_start", principal=principal, session_id=session.session_id)
     now = session.created_at
     _persist("session", {
         "sessionId": session.session_id, "status": session.status,
@@ -1136,8 +1160,8 @@ async def create_session(payload: CreateLiveSessionRequest) -> LiveSessionRespon
 
 
 @router.get("/api/live/sessions", response_model=list[LiveSessionResponse])
-def get_sessions(limit: int = Query(default=20, ge=1, le=100)) -> list[LiveSessionResponse]:
-    return list_live_sessions(limit)
+def get_sessions(limit: int = Query(default=20, ge=1, le=100), principal: Principal = Depends(require_principal)) -> list[LiveSessionResponse]:
+    return list_live_sessions(limit, owner_id=None if principal.is_admin else principal.user_id)
 
 
 def _specialized_worker_health(name: str, queue: object | None, enabled: bool) -> dict[str, object]:
@@ -1172,8 +1196,20 @@ def _specialized_worker_health(name: str, queue: object | None, enabled: bool) -
     }
 
 
+def production_pipeline_readiness() -> tuple[bool, bool, bool]:
+    worker = _live_processing_worker
+    health = worker.health() if worker is not None else {}
+    worker_ready = bool(health.get("ready"))
+    queue_ready = worker is not None and int(health.get("queueDepth", 0)) < int(health.get("capacity", 1))
+    persistence_ready = not _runtime_settings.live_pipeline_persistence_enabled or (
+        _persistence_service is not None and int(_persistence_service.metrics().get("degraded_sessions", 0)) == 0
+    )
+    return worker_ready, queue_ready, persistence_ready
+
+
 @router.get("/api/live/workers/health")
-def processing_worker_health() -> dict[str, object]:
+def processing_worker_health(principal: Principal = Depends(require_principal)) -> dict[str, object]:
+    require_admin(principal)
     workers = {
         "live_transcription": _get_live_processing_worker().health(),
         "accurate_final_transcription": _specialized_worker_health("accurate_final_transcription", _final_queue, _runtime_settings.live_accurate_final_enabled),
@@ -1186,8 +1222,14 @@ def processing_worker_health() -> dict[str, object]:
 
 
 @router.get("/api/live/monitoring")
-def live_monitoring(session_id: str | None = Query(default=None)) -> dict[str, object]:
-    health = processing_worker_health()
+def live_monitoring(session_id: str | None = Query(default=None), principal: Principal = Depends(require_principal)) -> dict[str, object]:
+    _enforce_rate("monitoring", principal, _runtime_settings.rate_monitoring_per_minute, session_id=session_id)
+    if session_id:
+        authorize_owner(principal, get_live_session_owner(session_id))
+    else:
+        require_admin(principal)
+    audit_event("monitoring_access", principal=principal, session_id=session_id)
+    health = processing_worker_health(principal)
     sessions = list_live_sessions(100)
     persistence = _persistence_service.metrics() if _persistence_service is not None else {}
     session_metrics: dict[str, object] | None = None
@@ -1214,9 +1256,12 @@ def live_monitoring(session_id: str | None = Query(default=None)) -> dict[str, o
 
 
 @router.post("/api/live/glossary/reload")
-def reload_live_glossary() -> dict[str, object]:
+def reload_live_glossary(principal: Principal = Depends(require_principal)) -> dict[str, object]:
+    require_admin(principal)
+    _enforce_rate("glossary_reload", principal, _runtime_settings.rate_glossary_reload_per_minute)
     manager = _get_glossary_manager()
     snapshot = manager.reload()
+    audit_event("glossary_reload", principal=principal, metadata={"version": snapshot.version})
     return {
         "enabled": manager.enabled,
         "version": snapshot.version,
@@ -1229,7 +1274,9 @@ async def rename_live_speaker(
     session_id: str,
     speaker_id: str,
     payload: SpeakerRenameRequest,
+    principal: Principal = Depends(require_principal),
 ) -> dict[str, object]:
+    authorize_owner(principal, get_live_session_owner(session_id))
     if not _runtime_settings.live_diarization_enabled:
         raise HTTPException(status_code=409, detail="Live speaker diarization is disabled")
     queue = _get_diarization_queue()
@@ -1249,6 +1296,7 @@ async def rename_live_speaker(
     persistence = _get_persistence_service()
     if persistence is not None:
         await persistence.rename_speaker(session_id, speaker_id, response["label"])
+    audit_event("speaker_rename", principal=principal, session_id=session_id, metadata={"speakerId": speaker_id})
     await _send_to_current_connection(
         session_id,
         _event("diarization_snapshot", **response),
@@ -1257,12 +1305,14 @@ async def rename_live_speaker(
 
 
 @router.get("/api/live/sessions/{session_id}", response_model=LiveSessionResponse)
-def get_session(session_id: str) -> LiveSessionResponse:
+def get_session(session_id: str, principal: Principal = Depends(require_principal)) -> LiveSessionResponse:
+    authorize_owner(principal, get_live_session_owner(session_id))
     return get_live_session(session_id)
 
 
 @router.post("/api/live/sessions/{session_id}/stop", response_model=LiveSessionResponse)
-async def stop_session(session_id: str) -> LiveSessionResponse:
+async def stop_session(session_id: str, principal: Principal = Depends(require_principal)) -> LiveSessionResponse:
+    authorize_owner(principal, get_live_session_owner(session_id))
     await _finish_pcm_session(session_id)
     session = await asyncio.to_thread(stop_live_session, session_id)
     _persist("session", {
@@ -1284,19 +1334,44 @@ async def stop_session(session_id: str) -> LiveSessionResponse:
             await websocket.close(code=1000)
         except RuntimeError:
             pass
+    audit_event("session_stop", principal=principal, session_id=session_id)
+    _reconnect_attempts.pop(session_id, None)
     return session
 
 
 @router.websocket("/ws/live/{session_id}")
 async def live_websocket(websocket: WebSocket, session_id: str) -> None:
     if not is_allowed_web_origin(websocket.headers.get("origin")):
+        audit_event("auth_failure", outcome="rejected", metadata={"transport": "websocket", "reason": "origin"})
         await websocket.close(code=1008, reason="WebSocket origin is not allowed")
         return
-    await websocket.accept()
+    try:
+        principal = websocket_principal(websocket)
+    except HTTPException:
+        try:
+            audit_event("auth_failure", outcome="rejected", metadata={"transport": "websocket"})
+        except Exception:
+            pass
+        await websocket.close(code=1008, reason="WebSocket authentication failed")
+        return
+    try:
+        _enforce_rate("websocket_connect", principal, _runtime_settings.rate_websocket_connect_per_minute, session_id=session_id)
+        authorize_owner(principal, await asyncio.to_thread(get_live_session_owner, session_id))
+    except HTTPException:
+        await websocket.close(code=1008, reason="WebSocket access denied")
+        return
+    attempts = _reconnect_attempts.get(session_id, -1) + 1
+    _reconnect_attempts[session_id] = attempts
+    if attempts > _runtime_settings.limit_reconnect_attempts:
+        audit_event("rate_limit_rejection", principal=principal, session_id=session_id, outcome="rejected", metadata={"category": "reconnect"})
+        await websocket.close(code=1008, reason="Reconnect limit reached")
+        return
+    requested_protocols = [item.strip().lower() for item in websocket.headers.get("sec-websocket-protocol", "").split(",")]
+    await websocket.accept(subprotocol="bearer" if requested_protocols and requested_protocols[0] == "bearer" else None)
     try:
         session = await asyncio.to_thread(get_live_session, session_id)
     except Exception as exc:
-        await websocket.send_json(_event("error", message=str(exc)))
+        await websocket.send_json(_event("error", message=safe_error(exc)))
         await websocket.close(code=1008)
         return
 
@@ -1317,9 +1392,29 @@ async def live_websocket(websocket: WebSocket, session_id: str) -> None:
     await websocket.send_json(_event("connected", session))
     pending_pcm_metadata: PcmChunkMetadata | None = None
     pcm_registered = False
+    last_client_activity = monotonic()
     try:
         while True:
-            message = await websocket.receive()
+            if (datetime.now(timezone.utc) - session.started_at).total_seconds() > _runtime_settings.limit_session_duration_seconds:
+                await _finish_pcm_session(session_id)
+                await asyncio.to_thread(stop_live_session, session_id)
+                audit_event("session_stop", principal=principal, session_id=session_id, metadata={"reason": "duration_limit"})
+                _reconnect_attempts.pop(session_id, None)
+                await websocket.close(code=1000, reason="Session duration limit reached")
+                return
+            try:
+                message = await asyncio.wait_for(websocket.receive(), timeout=_runtime_settings.websocket_heartbeat_seconds)
+            except asyncio.TimeoutError:
+                if websocket_idle_expired(last_client_activity, monotonic(), _runtime_settings.websocket_idle_timeout_seconds):
+                    await _finish_pcm_session(session_id)
+                    await asyncio.to_thread(stop_live_session, session_id)
+                    audit_event("session_stop", principal=principal, session_id=session_id, metadata={"reason": "idle_timeout"})
+                    _reconnect_attempts.pop(session_id, None)
+                    await websocket.close(code=1001, reason="Idle timeout")
+                    return
+                await websocket.send_json(_event("heartbeat", timestamp=datetime.now(timezone.utc).isoformat()))
+                continue
+            last_client_activity = monotonic()
             if message["type"] == "websocket.disconnect":
                 raise WebSocketDisconnect(message.get("code", 1006))
 
@@ -1328,6 +1423,15 @@ async def live_websocket(websocket: WebSocket, session_id: str) -> None:
                 if not audio:
                     await websocket.send_json(_event("error", message="Audio chunk is empty"))
                     continue
+                try:
+                    validate_audio_frame_size(len(audio), _runtime_settings.limit_audio_chunk_bytes)
+                except ValueError as exc:
+                    await websocket.send_json(_event("error", message=str(exc)))
+                    continue
+                if not rate_limiter.allow("audio_throughput", principal.user_id, _runtime_settings.rate_audio_bytes_per_second, window_seconds=1.0, cost=len(audio)):
+                    audit_event("rate_limit_rejection", principal=principal, session_id=session_id, outcome="rejected", metadata={"category": "audio_throughput"})
+                    await websocket.close(code=1008, reason="Audio throughput limit reached")
+                    return
                 if pending_pcm_metadata is not None:
                     metadata = pending_pcm_metadata
                     pending_pcm_metadata = None
@@ -1352,9 +1456,6 @@ async def live_websocket(websocket: WebSocket, session_id: str) -> None:
                     if outcome.status != "backpressure":
                         await _schedule_pcm_transcription(session_id)
                     continue
-                if len(audio) > MAX_LIVE_CHUNK_BYTES:
-                    await websocket.send_json(_event("error", message="Audio chunk exceeds the 10 MB limit"))
-                    continue
                 await websocket.send_json(_event("processing"))
                 try:
                     session, duplicate = await asyncio.to_thread(process_live_chunk, session_id, audio)
@@ -1363,8 +1464,8 @@ async def live_websocket(websocket: WebSocket, session_id: str) -> None:
                     await websocket.send_json(_event("error", current, message=str(exc.detail)))
                     continue
                 except Exception as exc:
-                    failed = await asyncio.to_thread(fail_live_session, session_id, f"{type(exc).__name__}: {exc}")
-                    await websocket.send_json(_event("error", failed, message=failed.error or str(exc)))
+                    failed = await asyncio.to_thread(fail_live_session, session_id, safe_error(exc))
+                    await websocket.send_json(_event("error", failed, message=safe_error(exc)))
                     await websocket.close(code=1011)
                     return
                 await websocket.send_json(_event("partial", session, duplicate=duplicate))
@@ -1527,6 +1628,8 @@ async def live_websocket(websocket: WebSocket, session_id: str) -> None:
                                 metrics=_transcript_postprocess_queue.metrics(),
                             )
                         )
+                elif command_type == "ping":
+                    await websocket.send_json(_event("pong", timestamp=datetime.now(timezone.utc).isoformat()))
                 elif command_type == "pcm_chunk":
                     if not _runtime_settings.live_pcm_streaming_enabled or not pcm_registered:
                         await websocket.send_json(
@@ -1553,6 +1656,8 @@ async def live_websocket(websocket: WebSocket, session_id: str) -> None:
                     session = await asyncio.to_thread(stop_live_session, session_id)
                     await websocket.send_json(_event("final", session))
                     await websocket.send_json(_event("stopped", session))
+                    audit_event("session_stop", principal=principal, session_id=session_id)
+                    _reconnect_attempts.pop(session_id, None)
                     await websocket.close(code=1000)
                     return
                 else:
@@ -1563,8 +1668,9 @@ async def live_websocket(websocket: WebSocket, session_id: str) -> None:
             except PcmProtocolError as exc:
                 await websocket.send_json(_event("error", message=str(exc), transport="pcm16"))
     except WebSocketDisconnect:
-        await asyncio.to_thread(record_disconnect, session_id)
+        pass
     finally:
+        await asyncio.to_thread(record_disconnect, session_id)
         async with _connections_lock:
             if _connections.get(session_id) is websocket:
                 _connections.pop(session_id, None)

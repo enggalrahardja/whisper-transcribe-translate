@@ -1,6 +1,6 @@
 import asyncio
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 
 from ..models.settings import (
     ApplicationSettingsResponse,
@@ -27,8 +27,15 @@ from ..services.whisper_models import (
     scan_whisper_models,
     verify_whisper_model,
 )
+from ..security import Principal, require_admin, require_principal
+from ..services.production_hardening import audit_event
 
-router = APIRouter(prefix="/api/settings", tags=["settings"])
+
+def _admin_settings_access(principal: Principal = Depends(require_principal)) -> Principal:
+    require_admin(principal)
+    return principal
+
+router = APIRouter(prefix="/api/settings", tags=["settings"], dependencies=[Depends(_admin_settings_access)])
 
 
 @router.get("", response_model=ApplicationSettingsResponse)
@@ -37,8 +44,22 @@ def get_settings() -> ApplicationSettingsResponse:
 
 
 @router.patch("", response_model=ApplicationSettingsResponse)
-def patch_settings(payload: UpdateApplicationSettingsRequest) -> ApplicationSettingsResponse:
-    return update_application_settings(payload)
+def patch_settings(
+    payload: UpdateApplicationSettingsRequest,
+    principal: Principal = Depends(require_principal),
+) -> ApplicationSettingsResponse:
+    require_admin(principal)
+    before = get_application_settings()
+    result = update_application_settings(payload)
+    if (
+        before.general.default_whisper_model != result.general.default_whisper_model
+        or before.live_transcription.default_live_model != result.live_transcription.default_live_model
+    ):
+        audit_event(
+            "profile_change", principal=principal,
+            metadata={"defaultModel": result.general.default_whisper_model, "liveModel": result.live_transcription.default_live_model},
+        )
+    return result
 
 
 @router.get("/runtime", response_model=WorkerRuntimeResponse)
@@ -89,7 +110,7 @@ async def delete_model(model: WhisperModel) -> WhisperModelResponse:
     except OSError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=f"Whisper model file could not be deleted: {exc}",
+            detail="Whisper model file could not be deleted",
         ) from exc
 
 

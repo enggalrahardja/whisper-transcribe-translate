@@ -12,6 +12,17 @@ Only `base.pt` was available; all other results remain explicitly `not_run`.
 Audit date: 2026-07-27. This document describes implemented behavior, not the
 aspirational architecture in `README.md` or `PLAN.md`.
 
+## Stage 16 addendum — production boundary
+
+Stage 16 adds an opt-in development/mandatory production security boundary:
+environment bearer principals, owner-scoped sessions, admin operations,
+pre-accept WebSocket auth/origin checks, in-process rate/resource limits, strict
+PCM frames, sanitized errors/audit records, bounded retention cleanup, security
+headers, startup validation, and dependency readiness. The legacy local path
+remains the development default and no cloud provider was introduced. TLS,
+encryption at rest, shared multi-instance limiting, durable audit export, and
+cleanup scheduling remain deployment concerns.
+
 ## Implemented processing flows
 
 ### Web upload flow (primary headless path)

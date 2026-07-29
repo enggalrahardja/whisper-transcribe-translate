@@ -86,7 +86,10 @@ async def save_upload(upload: UploadFile) -> dict[str, str | int]:
     destination = get_upload_directory() / stored_name
     size = 0
     header = bytearray()
-    maximum_size = storage_settings.upload_max_size_mb * 1024 * 1024
+    maximum_size = min(
+        storage_settings.upload_max_size_mb * 1024 * 1024,
+        get_settings().limit_upload_bytes,
+    )
 
     try:
         with destination.open("wb") as output:
@@ -97,7 +100,7 @@ async def save_upload(upload: UploadFile) -> dict[str, str | int]:
                 if size > maximum_size:
                     raise HTTPException(
                         status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-                        detail=f"Upload exceeds the {storage_settings.upload_max_size_mb} MB limit",
+                        detail="Upload exceeds the configured size limit",
                     )
                 output.write(chunk)
     except Exception:

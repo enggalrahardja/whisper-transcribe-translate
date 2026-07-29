@@ -16,6 +16,32 @@ class Settings(BaseSettings):
     mongodb_uri: str = "mongodb://127.0.0.1:27017"
     mongodb_database: str = "whisper_transcribe_translate"
     storage_root: str = "storage"
+    app_debug: bool = False
+    security_auth_enabled: bool = False
+    security_tokens_json: str = "{}"
+    security_trusted_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
+    security_require_https: bool = False
+    security_profile: str = "Fast"
+    rate_session_create_per_minute: int = 10
+    rate_websocket_connect_per_minute: int = 20
+    rate_audio_bytes_per_second: int = 128_000
+    rate_glossary_reload_per_minute: int = 2
+    rate_monitoring_per_minute: int = 30
+    limit_concurrent_sessions: int = 8
+    limit_session_duration_seconds: int = 14_400
+    limit_audio_chunk_bytes: int = 524_288
+    limit_queue_depth: int = 256
+    limit_upload_bytes: int = 1_073_741_824
+    limit_reconnect_attempts: int = 20
+    websocket_idle_timeout_seconds: float = 30.0
+    websocket_heartbeat_seconds: float = 10.0
+    retention_session_metadata_days: int = 90
+    retention_audio_days: int = 30
+    retention_transcript_days: int = 90
+    retention_translation_days: int = 90
+    retention_metrics_days: int = 30
+    retention_audit_days: int = 365
+    retention_cleanup_batch_size: int = 500
     whisper_model_dir: Path = PROJECT_ROOT / "storage/models/whisper"
     whisper_download_timeout_seconds: float = 30.0
     whisper_download_max_retries: int = 2
@@ -112,6 +138,82 @@ class Settings(BaseSettings):
         if not path.is_absolute():
             path = PROJECT_ROOT / path
         return path.resolve()
+
+
+def validate_startup_configuration(settings: Settings) -> None:
+    """Reject unsafe production settings while keeping development friction low."""
+    positive = {
+        "session create rate": settings.rate_session_create_per_minute,
+        "WebSocket rate": settings.rate_websocket_connect_per_minute,
+        "audio throughput": settings.rate_audio_bytes_per_second,
+        "concurrent sessions": settings.limit_concurrent_sessions,
+        "session duration": settings.limit_session_duration_seconds,
+        "chunk bytes": settings.limit_audio_chunk_bytes,
+        "queue depth": settings.limit_queue_depth,
+        "upload bytes": settings.limit_upload_bytes,
+        "reconnect attempts": settings.limit_reconnect_attempts,
+        "cleanup batch": settings.retention_cleanup_batch_size,
+    }
+    invalid = [name for name, value in positive.items() if value <= 0]
+    retentions = {
+        "session metadata": settings.retention_session_metadata_days,
+        "audio": settings.retention_audio_days,
+        "transcript": settings.retention_transcript_days,
+        "translation": settings.retention_translation_days,
+        "metrics": settings.retention_metrics_days,
+        "audit": settings.retention_audit_days,
+    }
+    invalid.extend(f"{name} retention" for name, value in retentions.items() if value < 1)
+    if invalid:
+        raise ValueError("Invalid production limits: " + ", ".join(invalid))
+    if settings.limit_audio_chunk_bytes < 8_000 or settings.limit_audio_chunk_bytes > 10 * 1024 * 1024:
+        raise ValueError("Audio chunk limit must be between 8000 bytes and 10 MiB")
+    if settings.websocket_heartbeat_seconds <= 0 or settings.websocket_idle_timeout_seconds <= settings.websocket_heartbeat_seconds:
+        raise ValueError("WebSocket idle timeout must exceed the positive heartbeat interval")
+    queue_capacities = (
+        settings.live_processing_worker_queue_capacity, settings.live_final_queue_capacity,
+        settings.live_translation_queue_capacity, settings.live_translation_quality_queue_capacity,
+        settings.live_diarization_queue_capacity, settings.live_transcript_postprocess_queue_capacity,
+        settings.live_pipeline_persistence_queue_capacity,
+    )
+    if any(value > settings.limit_queue_depth for value in queue_capacities):
+        raise ValueError("Worker queue capacity exceeds the configured production maximum")
+    if settings.security_profile not in {"Fast", "Balanced", "Accurate", "Private"}:
+        raise ValueError("Unsupported security profile")
+    if settings.app_env.lower() != "production":
+        return
+    import json
+    from urllib.parse import urlsplit
+    if settings.app_debug:
+        raise ValueError("Debug mode must be disabled in production")
+    if not settings.security_auth_enabled:
+        raise ValueError("Authentication must be enabled in production")
+    try:
+        tokens = json.loads(settings.security_tokens_json)
+    except json.JSONDecodeError as exc:
+        raise ValueError("SECURITY_TOKENS_JSON must be valid JSON") from exc
+    if not isinstance(tokens, dict) or not tokens or any(
+        len(str(token)) < 32 or any(marker in str(token).lower() for marker in ("replace", "change-me", "example", "default"))
+        for token in tokens
+    ):
+        raise ValueError("Production requires non-default bearer tokens of at least 32 characters")
+    if len(tokens) > 10_000 or any(
+        isinstance(value, dict) and (
+            not value.get("userId") or value.get("role", "user") not in {"user", "admin"}
+        )
+        for value in tokens.values()
+    ):
+        raise ValueError("Production bearer principal mapping is invalid")
+    origins = [value.strip() for value in settings.security_trusted_origins.split(",") if value.strip()]
+    if not origins or "*" in settings.web_origin or any("*" in value for value in origins):
+        raise ValueError("Wildcard or empty trusted origins are forbidden in production")
+    if settings.security_require_https and (
+        urlsplit(settings.web_origin).scheme != "https" or any(urlsplit(value).scheme != "https" for value in origins)
+    ):
+        raise ValueError("HTTPS trusted origins are required in production")
+    checkpoint = settings.whisper_model_dir / ({"Fast": "base.pt", "Balanced": "small.pt", "Accurate": "base.pt", "Private": "base.pt"}[settings.security_profile])
+    if not checkpoint.is_file():
+        raise ValueError(f"Required local checkpoint is unavailable for profile {settings.security_profile}")
 
 
 @lru_cache

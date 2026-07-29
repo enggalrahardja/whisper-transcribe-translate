@@ -23,6 +23,7 @@ def ensure_live_session_indexes() -> None:
     collection = get_database()[COLLECTION_NAME]
     collection.create_index([("session_id", ASCENDING)], unique=True, name="unique_live_session_id")
     collection.create_index([("created_at", DESCENDING)])
+    collection.create_index([("owner_id", ASCENDING), ("status", ASCENDING), ("created_at", DESCENDING)], name="owner_session_status")
 
 
 def _serialize(document: dict) -> LiveSessionResponse:
@@ -50,11 +51,12 @@ def _get_document(session_id: str) -> dict:
     return document
 
 
-def create_live_session(payload: CreateLiveSessionRequest) -> LiveSessionResponse:
+def create_live_session(payload: CreateLiveSessionRequest, *, owner_id: str = "development-user") -> LiveSessionResponse:
     with whisper_model_usage(payload.model, "live-session-create"):
         now = utc_now()
         document = {
             "session_id": uuid4().hex,
+            "owner_id": owner_id,
             "status": "active",
             "language": payload.language.strip().lower(),
             "model": payload.model,
@@ -79,9 +81,22 @@ def get_live_session(session_id: str) -> LiveSessionResponse:
     return _serialize(_get_document(session_id))
 
 
-def list_live_sessions(limit: int = 20) -> list[LiveSessionResponse]:
-    documents = get_database()[COLLECTION_NAME].find().sort("created_at", DESCENDING).limit(limit)
+def list_live_sessions(limit: int = 20, *, owner_id: str | None = None) -> list[LiveSessionResponse]:
+    query = {} if owner_id is None else {"owner_id": owner_id}
+    documents = get_database()[COLLECTION_NAME].find(query).sort("created_at", DESCENDING).limit(limit)
     return [_serialize(document) for document in documents]
+
+
+def get_live_session_owner(session_id: str) -> str | None:
+    document = _get_document(session_id)
+    return document.get("owner_id")
+
+
+def count_active_sessions(*, owner_id: str | None = None) -> int:
+    query: dict = {"status": {"$in": ["active", "paused"]}}
+    if owner_id is not None:
+        query["owner_id"] = owner_id
+    return get_database()[COLLECTION_NAME].count_documents(query)
 
 
 def claim_live_chunk(session_id: str, chunk_hash: str) -> tuple[dict, bool]:

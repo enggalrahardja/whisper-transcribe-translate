@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 
-from fastapi import FastAPI, HTTPException, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pymongo.errors import PyMongoError
@@ -18,11 +18,14 @@ from .routes.live import (
     shutdown_transcript_postprocess_queue,
     shutdown_processing_workers,
     startup_processing_workers,
+    production_pipeline_readiness,
 )
 from .routes.settings import router as settings_router
 from .routes.subtitles import router as subtitles_router
 from .routes.uploads import router as uploads_router
-from .security import allowed_web_origins
+from .security import Principal, allowed_web_origins, require_admin, require_principal, safe_error
+from .services.production_hardening import audit_event, cleanup_retention, dependency_readiness, ensure_production_hardening_indexes
+from .config import validate_startup_configuration
 from .services.jobs import ensure_job_indexes
 from .services.application_settings import RUNTIME_COLLECTION, ensure_application_settings, get_application_settings
 from .services.live_sessions import ensure_live_session_indexes
@@ -36,6 +39,7 @@ from .services.whisper_models import WhisperModelUnavailableError, ensure_whispe
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     try:
+        validate_startup_configuration(get_settings())
         # Make an explicit server selection before running any startup work. This
         # prevents Uvicorn from appearing healthy while MongoDB is unavailable.
         get_database().command("ping")
@@ -48,6 +52,7 @@ async def lifespan(_: FastAPI):
         recover_interrupted_subtitle_burns()
         ensure_transcript_indexes()
         ensure_whisper_model_registry()
+        ensure_production_hardening_indexes()
         await startup_processing_workers()
         yield
     finally:
@@ -62,6 +67,27 @@ async def lifespan(_: FastAPI):
 
 settings = get_settings()
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
+
+
+if settings.app_env.lower() == "production":
+    @app.exception_handler(Exception)
+    async def sanitized_exception_handler(_: Request, exc: Exception) -> JSONResponse:
+        return JSONResponse(status_code=500, content={"detail": safe_error(exc)})
+
+
+@app.middleware("http")
+async def production_security_headers(request: Request, call_next):
+    if settings.security_require_https and request.url.scheme != "https":
+        return JSONResponse(status_code=400, content={"detail": "HTTPS is required"})
+    response = await call_next(request)
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Permissions-Policy"] = "camera=(), geolocation=(), payment=()"
+    response.headers["Content-Security-Policy"] = "default-src 'none'; frame-ancestors 'none'"
+    if settings.security_require_https:
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
 
 
 @app.exception_handler(WhisperModelUnavailableError)
@@ -79,7 +105,7 @@ app.add_middleware(
     allow_origins=sorted(allowed_web_origins()),
     allow_credentials=False,
     allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Content-Type"],
+    allow_headers=["Content-Type", "Authorization"],
 )
 app.include_router(jobs_router)
 app.include_router(live_router)
@@ -97,11 +123,11 @@ def health() -> dict[str, str]:
 def mongodb_health() -> dict[str, str]:
     try:
         get_database().command("ping")
-        return {"status": "ok", "database": settings.mongodb_database}
+        return {"status": "ok", "dependency": "mongodb"}
     except PyMongoError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={"status": "error", "message": str(exc)},
+            detail={"status": "error", "message": "Database unavailable"},
         ) from exc
 
 
@@ -120,7 +146,7 @@ def worker_health() -> dict[str, str]:
     except PyMongoError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail={"status": "error", "message": str(exc)},
+            detail={"status": "error", "message": "Worker status unavailable"},
         ) from exc
 
     if runtime is None:
@@ -129,11 +155,30 @@ def worker_health() -> dict[str, str]:
             detail={"status": "error", "message": "No fresh worker heartbeat found"},
         )
 
-    heartbeat = runtime["last_heartbeat"]
-    if heartbeat.tzinfo is None:
-        heartbeat = heartbeat.replace(tzinfo=timezone.utc)
+    return {"status": "ok", "dependency": "worker", "heartbeat_fresh": True}
+
+
+@app.get("/health/readiness")
+def readiness() -> JSONResponse:
+    worker, queue, persistence = production_pipeline_readiness()
+    result = dependency_readiness(
+        worker_check=lambda: worker,
+        queue_check=lambda: queue,
+        persistence_check=lambda: persistence,
+    )
+    return JSONResponse(status_code=200 if result["status"] == "ready" else 503, content=result)
+
+
+@app.post("/api/operations/retention/cleanup")
+def retention_cleanup(
+    dry_run: bool = Query(default=True),
+    principal: Principal = Depends(require_principal),
+) -> dict[str, object]:
+    require_admin(principal)
+    result = cleanup_retention(dry_run=dry_run)
+    audit_event("retention_cleanup", principal=principal, metadata={"dryRun": dry_run, "eligible": result.eligible, "deleted": result.deleted})
     return {
-        "status": "ok",
-        "worker_id": str(runtime["worker_id"]),
-        "last_heartbeat": heartbeat.isoformat(),
+        "dryRun": result.dry_run, "scanned": result.scanned,
+        "eligible": result.eligible, "deleted": result.deleted,
+        "limited": result.limited, "errors": list(result.errors),
     }

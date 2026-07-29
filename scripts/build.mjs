@@ -3,8 +3,20 @@ import { spawn } from "node:child_process";
 import { productionEnv, projectRoot } from "./production-env.mjs";
 import { runChild } from "./run-child.mjs";
 
-const command = process.platform === "win32" ? "pnpm.cmd" : "pnpm";
-const child = spawn(command, ["--dir", "apps/web", "build"], {
+const pnpmArgs = ["--dir", "apps/web", "build"];
+const pnpmEntryPoint = process.env.npm_execpath;
+const command = pnpmEntryPoint
+  ? process.execPath
+  : process.platform === "win32"
+    ? process.env.ComSpec ?? "cmd.exe"
+    : "pnpm";
+const args = pnpmEntryPoint
+  ? [pnpmEntryPoint, ...pnpmArgs]
+  : process.platform === "win32"
+    ? ["/d", "/s", "/c", "pnpm", ...pnpmArgs]
+    : pnpmArgs;
+
+const child = spawn(command, args, {
   cwd: projectRoot,
   env: productionEnv(),
   stdio: "inherit",

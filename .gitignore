@@ -10,6 +10,7 @@ assets/config/*.json
 node_modules/
 apps/web/node_modules/
 apps/web/.next/
+apps/web/.next-production/
 apps/web/next-env.d.ts
 **/*.tsbuildinfo
 

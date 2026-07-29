@@ -39,6 +39,7 @@ export function productionEnv() {
     WEB_PORT: "3000",
     WEB_ORIGIN: "http://127.0.0.1:3000",
     NEXT_PUBLIC_API_BASE_URL: "http://127.0.0.1:8000",
+    NEXT_DIST_DIR: ".next-production",
     NODE_ENV: "production",
     ...fileValues,
     ...process.env,

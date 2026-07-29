@@ -380,3 +380,20 @@ cloud fallback; optional cloud to local fallback is explicit. Pricing is a
 dated catalogue independent of accuracy, and the Stage 15-compatible cloud
 adapter is gated by key, billing approval, and dataset-transfer approval. See
 `docs/stage17-openai-provider.md`.
+
+## Stage 18 addendum
+
+Stage 18 adds startup-validated release profiles and a reproducible acceptance
+orchestrator. The default `development-local` profile preserves all local-first
+and legacy defaults. `production-local` forbids cloud transcription without
+requiring cloud credentials. `production-hybrid` explicitly selects OpenAI and
+requires its server-side key and external-audio consent.
+
+The evidence run executes regression tests, benchmark validation, Python
+compilation, the production web build, and a fresh seven-case local `base`
+benchmark. Machine-readable and Markdown reports distinguish measured values,
+automated lifecycle tests, skipped cloud checks, and pending physical/deployed
+acceptance. The current verdict is **NO-GO**, principally because physical
+microphone, real Mongo/API restart, deployed security, and real-model local
+translation/diarization E2E have not passed. See
+`docs/stage18-release-readiness.md` and `acceptance/stage18/results/`.

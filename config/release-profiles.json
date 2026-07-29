@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "defaultProfile": "development-local",
+  "profiles": {
+    "development-local": {
+      "environment": "development",
+      "liveProvider": "local",
+      "finalProvider": "local",
+      "requiresCloudCredential": false,
+      "requiresExternalAudioConsent": false,
+      "description": "Safe developer default using local processing and legacy/default-off feature flags."
+    },
+    "production-local": {
+      "environment": "production",
+      "liveProvider": "local",
+      "finalProvider": "local",
+      "requiresCloudCredential": false,
+      "requiresExternalAudioConsent": false,
+      "description": "Production security posture with all transcription audio processed locally."
+    },
+    "production-hybrid": {
+      "environment": "production",
+      "liveProvider": "openai",
+      "finalProvider": "openai",
+      "requiresCloudCredential": true,
+      "requiresExternalAudioConsent": true,
+      "description": "Explicit opt-in cloud transcription with local pipeline and configured local fallback retained."
+    }
+  }
+}

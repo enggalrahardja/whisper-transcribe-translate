@@ -1,0 +1,257 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-07-29T22:59:03.296217+00:00",
+  "verdict": "NO-GO",
+  "verdictReason": "Production release is blocked by missing physical microphone, deployed restart/restore, deployment security, and real-model translation/diarization acceptance evidence.",
+  "hardware": {
+    "os": "Windows-10-10.0.22631-SP0",
+    "processor": "Intel64 Family 6 Model 158 Stepping 11, GenuineIntel",
+    "logicalCpuCount": 4,
+    "nvidiaSmiAvailable": true
+  },
+  "checks": [
+    {
+      "name": "api-tests",
+      "status": "pass",
+      "returnCode": 0,
+      "durationSeconds": 5.732,
+      "command": ".\\services\\api\\.venv\\Scripts\\python.exe -m unittest discover -s tests -q",
+      "outputTail": "----------------------------------------------------------------------\nRan 198 tests in 2.063s\n\nOK"
+    },
+    {
+      "name": "benchmark-tests",
+      "status": "pass",
+      "returnCode": 0,
+      "durationSeconds": 0.457,
+      "command": ".\\services\\api\\.venv\\Scripts\\python.exe -m unittest discover -s benchmarks/tests -q",
+      "outputTail": "Wrote 1 result(s) to <HOME>\\AppData\\Local\\Temp\\tmpfu2jyw1g\\results\n\nSKIPPED: OPENAI_BILLING_APPROVED is not true\nSKIPPED: BENCHMARK_CLOUD_DATA_APPROVED is not true\nSKIPPED: OPENAI_API_KEY is unavailable\nRunning fixture...\n----------------------------------------------------------------------\nRan 11 tests in 0.189s\n\nOK"
+    },
+    {
+      "name": "benchmark-manifest",
+      "status": "pass",
+      "returnCode": 0,
+      "durationSeconds": 0.135,
+      "command": ".\\services\\api\\.venv\\Scripts\\python.exe benchmarks/run.py validate",
+      "outputTail": "Manifest valid: 7 cases, 7 enabled"
+    },
+    {
+      "name": "python-compile",
+      "status": "pass",
+      "returnCode": 0,
+      "durationSeconds": 0.148,
+      "command": ".\\services\\api\\.venv\\Scripts\\python.exe -m compileall -q services/api/app services/api/tests benchmarks acceptance/stage18",
+      "outputTail": ""
+    },
+    {
+      "name": "web-build",
+      "status": "pass",
+      "returnCode": 0,
+      "durationSeconds": 24.154,
+      "command": "<HOME>\\AppData\\Roaming\\npm\\pnpm.CMD --dir apps/web build",
+      "outputTail": "> whisper-web@0.1.0 build .\\apps\\web\n> next build\n\n   \u25b2 Next.js 15.4.4\n\n   Creating an optimized production build ...\n \u2713 Compiled successfully in 1000ms\n   Linting and checking validity of types ...\n   Collecting page data ...\n   Generating static pages (0/11) ...\n   Generating static pages (2/11) \n   Generating static pages (5/11) \n   Generating static pages (8/11) \n \u2713 Generating static pages (11/11)\n   Finalizing page optimization ...\n   Collecting build traces ...\n\nRoute (app)                                 Size  First Load JS\n\u250c \u0192 /                                    1.93 kB         106 kB\n\u251c \u25cb /_not-found                            993 B         102 kB\n\u251c \u25cb /history                             4.42 kB         108 kB\n\u251c \u0192 /jobs/[jobId]                        3.99 kB         108 kB\n\u251c \u25cb /live                                12.5 kB         117 kB\n\u251c \u0192 /live/[sessionId]                    2.74 kB         107 kB\n\u251c \u25cb /monitoring                          2.28 kB         103 kB\n\u251c \u25cb /settings                            7.66 kB         108 kB\n\u251c \u25cb /subtitle                            2.23 kB         106 kB\n\u251c \u0192 /subtitle/[projectId]                4.47 kB         109 kB\n\u251c \u25cb /transcribe                          2.94 kB         107 kB\n\u2514 \u25cb /translate                              3 kB         107 kB\n+ First Load JS shared by all             101 kB\n  \u251c chunks/43903a2a-0d0f8e60d13cf27f.js  54.1 kB\n  \u251c chunks/482-348c2e910664c6e6.js       44.6 kB\n  \u2514 other shared chunks (total)          1.99 kB\n\n\n\u25cb  (Static)   prerendered as static content\n\u0192  (Dynamic)  server-rendered on demand"
+    },
+    {
+      "name": "local-base-benchmark",
+      "status": "pass",
+      "returnCode": 0,
+      "durationSeconds": 43.333,
+      "command": ".\\services\\api\\.venv\\Scripts\\python.exe benchmarks/run.py run --provider local-whisper --model base --model-version base.pt --deployment local --provider-command \"\\\"services\\api\\.venv\\Scripts\\python.exe\\\" benchmarks/providers/current_whisper.py\" --beam-size 5 --timeout-seconds 600 --output-dir .\\acceptance\\stage18\\results\\local-base",
+      "outputTail": "Wrote 7 result(s) to .\\acceptance\\stage18\\results\\local-base\n\nRunning id_quiet_001...\nRunning en_quiet_001...\nRunning code_switch_001...\nRunning far_field_001...\nRunning background_noise_001...\nRunning multiple_speakers_001...\nRunning overlapping_speech_001..."
+    }
+  ],
+  "matrix": [
+    {
+      "area": "Bahasa Indonesia",
+      "status": "pass",
+      "evidence": "Stage 18/15 non-sensitive local base benchmark"
+    },
+    {
+      "area": "Bahasa Inggris",
+      "status": "pass",
+      "evidence": "Stage 18/15 non-sensitive local base benchmark"
+    },
+    {
+      "area": "Code-switching",
+      "status": "pass",
+      "evidence": "Stage 18/15 non-sensitive local base benchmark"
+    },
+    {
+      "area": "Technical terminology",
+      "status": "pass",
+      "evidence": "Stage 18/15 non-sensitive local base benchmark"
+    },
+    {
+      "area": "Quiet microphone fixture",
+      "status": "pass",
+      "evidence": "Stage 18/15 non-sensitive local base benchmark"
+    },
+    {
+      "area": "Background noise fixture",
+      "status": "pass",
+      "evidence": "Stage 18/15 non-sensitive local base benchmark"
+    },
+    {
+      "area": "Far-field fixture",
+      "status": "pass",
+      "evidence": "Stage 18/15 non-sensitive local base benchmark"
+    },
+    {
+      "area": "Multi-speaker ASR fixture",
+      "status": "pass",
+      "evidence": "Stage 18/15 non-sensitive local base benchmark"
+    },
+    {
+      "area": "Overlapping-speech ASR fixture",
+      "status": "pass",
+      "evidence": "Stage 18/15 non-sensitive local base benchmark"
+    },
+    {
+      "area": "PCM/VAD/state/accurate-final/glossary/downstream queues",
+      "status": "pass",
+      "evidence": "API acceptance and regression suite"
+    },
+    {
+      "area": "Reconnect and sequence anomaly handling",
+      "status": "pass",
+      "evidence": "PCM/VAD/session isolation tests"
+    },
+    {
+      "area": "Queue pressure and worker isolation",
+      "status": "pass",
+      "evidence": "bounded queue/backpressure/failure-isolation tests"
+    },
+    {
+      "area": "Persistence degradation and runtime restore",
+      "status": "pass",
+      "evidence": "repository/write-behind/reconnect restore tests"
+    },
+    {
+      "area": "Local translation real-model E2E",
+      "status": "pending",
+      "evidence": "Marian checkpoint was unavailable; lifecycle uses deterministic/fake-provider acceptance tests"
+    },
+    {
+      "area": "Local diarization real-model E2E",
+      "status": "pending",
+      "evidence": "SpeechBrain checkpoint was not pinned/available; clustering lifecycle tests pass"
+    },
+    {
+      "area": "Physical microphone E2E",
+      "status": "pending",
+      "evidence": "Physical microphone/device E2E was not available to the headless runner"
+    },
+    {
+      "area": "API restart with deployed persistence",
+      "status": "pending",
+      "evidence": "Repository restore tests pass, but API process restart against deployment Mongo/storage was not executed"
+    },
+    {
+      "area": "Production deployment security",
+      "status": "pending",
+      "evidence": "Automated auth/redaction tests pass; deployed TLS/origin/secret-manager acceptance was not executed"
+    },
+    {
+      "area": "OpenAI optional provider",
+      "status": "not_run",
+      "evidence": "key, billing approval, and cloud-dataset consent were not all available"
+    }
+  ],
+  "performance": {
+    "cases": 7,
+    "completedCases": 7,
+    "wer": 0.5277777777777778,
+    "cer": 0.1851713020834758,
+    "partialLatencyMs": null,
+    "stableLatencyMs": null,
+    "finalLatencyMs": 5649.02957142892,
+    "accurateFinalLatencyMs": null,
+    "translationLatencyMs": null,
+    "diarizationLatencyMs": null,
+    "endToEndLatencyMs": null,
+    "realTimeFactor": 1.3978891442053505,
+    "cpuPeakPercent": 408.37781740136353,
+    "ramPeakMiB": 770.94140625,
+    "gpuPeakPercent": null,
+    "vramPeakMiB": null,
+    "droppedChunkRate": null,
+    "duplicateRate": null,
+    "failureFallbackRate": null,
+    "queueDepth": null,
+    "estimatedOpenAICost": null
+  },
+  "openai": {
+    "status": "not_run",
+    "reason": "key, billing approval, and cloud-dataset consent were not all available"
+  },
+  "releaseProfiles": {
+    "schemaVersion": 1,
+    "defaultProfile": "development-local",
+    "profiles": {
+      "development-local": {
+        "environment": "development",
+        "liveProvider": "local",
+        "finalProvider": "local",
+        "requiresCloudCredential": false,
+        "requiresExternalAudioConsent": false,
+        "description": "Safe developer default using local processing and legacy/default-off feature flags."
+      },
+      "production-local": {
+        "environment": "production",
+        "liveProvider": "local",
+        "finalProvider": "local",
+        "requiresCloudCredential": false,
+        "requiresExternalAudioConsent": false,
+        "description": "Production security posture with all transcription audio processed locally."
+      },
+      "production-hybrid": {
+        "environment": "production",
+        "liveProvider": "openai",
+        "finalProvider": "openai",
+        "requiresCloudCredential": true,
+        "requiresExternalAudioConsent": true,
+        "description": "Explicit opt-in cloud transcription with local pipeline and configured local fallback retained."
+      }
+    }
+  },
+  "securityChecklist": [
+    {
+      "control": "Authentication/authorization/session ownership",
+      "status": "pass",
+      "evidence": "Stage 16 regression tests"
+    },
+    {
+      "control": "WebSocket auth/origin/input/rate limits",
+      "status": "pass",
+      "evidence": "Stage 16 regression tests"
+    },
+    {
+      "control": "Monitoring content/secret redaction",
+      "status": "pass",
+      "evidence": "monitoring and persistence redaction tests"
+    },
+    {
+      "control": "Local mode makes no cloud request",
+      "status": "pass",
+      "evidence": "local defaults/provider-selection tests"
+    },
+    {
+      "control": "OpenAI requires explicit key and consent",
+      "status": "pass",
+      "evidence": "provider/profile startup tests"
+    },
+    {
+      "control": "Deployed TLS/origin/secret manager",
+      "status": "pending",
+      "evidence": "Automated auth/redaction tests pass; deployed TLS/origin/secret-manager acceptance was not executed"
+    }
+  ],
+  "knownLimitations": [
+    "Physical browser microphone E2E was not executed in this headless environment unless explicit operator evidence says otherwise.",
+    "API process restart against a real MongoDB and storage deployment was not executed; repository-level restore is automated.",
+    "Translation and SpeechBrain diarization checkpoints were unavailable in the Stage 15 hardware snapshot, so their real-model E2E quality/latency remains unmeasured.",
+    "Whisper base partial/stable latency is unavailable because the existing model is segment-based rather than true token streaming.",
+    "GPU/VRAM values remain unavailable when NVIDIA telemetry or supported hardware is absent.",
+    "OpenAI was not called without all credential, billing, and dataset-consent gates.",
+    "In-process queues and provider rate limits remain non-durable and per-process."
+  ]
+}

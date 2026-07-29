@@ -17,6 +17,8 @@ class Settings(BaseSettings):
     mongodb_database: str = "whisper_transcribe_translate"
     storage_root: str = "storage"
     app_debug: bool = False
+    release_profile: str = "development-local"
+    release_profiles_path: Path = PROJECT_ROOT / "config/release-profiles.json"
     security_auth_enabled: bool = False
     security_tokens_json: str = "{}"
     security_trusted_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
@@ -160,9 +162,20 @@ class Settings(BaseSettings):
             path = PROJECT_ROOT / path
         return path.resolve()
 
+    @field_validator("release_profiles_path", mode="before")
+    @classmethod
+    def resolve_release_profiles_path(cls, value: str | Path) -> Path:
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            path = PROJECT_ROOT / path
+        return path.resolve()
+
 
 def validate_startup_configuration(settings: Settings) -> None:
     """Reject unsafe production settings while keeping development friction low."""
+    from .services.release_profiles import validate_release_profile
+
+    validate_release_profile(settings, settings.release_profiles_path)
     positive = {
         "session create rate": settings.rate_session_create_per_minute,
         "WebSocket rate": settings.rate_websocket_connect_per_minute,

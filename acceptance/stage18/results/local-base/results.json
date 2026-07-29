@@ -1,0 +1,564 @@
+{
+  "schema_version": "1.0",
+  "run_id": "20260729T225820Z",
+  "started_at": "2026-07-29T22:58:20.076588+00:00",
+  "completed_at": "2026-07-29T22:59:03.264213+00:00",
+  "dataset": {
+    "id": "stage15-safe-synthetic-benchmark",
+    "version": "1.0.0",
+    "manifest": "benchmarks\\dataset\\manifest.json"
+  },
+  "configuration": {
+    "provider": "local-whisper",
+    "model": "base",
+    "model_version": "base.pt",
+    "deployment": "local",
+    "beam_size": 5,
+    "provider_command": "\"services\\api\\.venv\\Scripts\\python.exe\" benchmarks/providers/current_whisper.py"
+  },
+  "execution": {
+    "isolation": "one_provider_process_per_case",
+    "cold_start_included": true,
+    "sample_interval_seconds": 0.2,
+    "timeout_seconds": 600.0
+  },
+  "results": [
+    {
+      "case_id": "id_quiet_001",
+      "status": "completed",
+      "provider": "local-whisper",
+      "model": "base",
+      "model_version": "base.pt",
+      "model_metadata": {
+        "checkpoint": "base.pt",
+        "checkpoint_sha256": "ed3a0b6b1c0edf879ad9b11b1af5a0e6ab5db9205f891f668f8b0e6c6326e34e",
+        "device": "cpu",
+        "compute_type": "float32",
+        "beam_size": 5
+      },
+      "provider_response_metadata": {
+        "request_id": null,
+        "usage": null,
+        "estimated_cost": null,
+        "actual_cost": null
+      },
+      "deployment": "local",
+      "hardware": {
+        "os": "Windows-10-10.0.22631-SP0",
+        "python": "3.11.9",
+        "machine": "AMD64",
+        "processor": "Intel64 Family 6 Model 158 Stepping 11, GenuineIntel",
+        "logical_cpu_count": 4,
+        "gpus": [],
+        "gpu_sampler_available": false
+      },
+      "audio_profile": [
+        "indonesian",
+        "quiet_microphone"
+      ],
+      "language": "id",
+      "target_language": "en",
+      "audio_duration_seconds": 3.765,
+      "accuracy": {
+        "wer": 0.6666666666666666,
+        "cer": 0.14285714285714285
+      },
+      "translation_evaluation": {
+        "source_input": "Repat teknis dimulap hukul sembilan pajai.",
+        "reference_output": "The technical meeting starts at nine in the morning.",
+        "provider_output": null,
+        "automatic_score": null,
+        "automatic_metric": "chrF-style-character-F1",
+        "human_review_status": "pending"
+      },
+      "latency": {
+        "partial_latency_ms": null,
+        "stable_latency_ms": null,
+        "final_latency_ms": 5504.312299999583,
+        "final_latency_origin": "audio_end_event",
+        "translation_latency_ms": null,
+        "diarization_latency_ms": null,
+        "model_load_time_ms": 676.430600004096,
+        "wall_time_seconds": 5.956792500001029,
+        "real_time_factor": 1.5821494023907114
+      },
+      "resource_usage": {
+        "cpu_percent_mean": 184.65507408562647,
+        "cpu_percent_peak": 408.37781740136353,
+        "ram_mib_mean": 437.8302951388889,
+        "ram_mib_peak": 727.5234375,
+        "gpu_percent_mean": null,
+        "gpu_percent_peak": null,
+        "vram_mib_mean": null,
+        "vram_mib_peak": null
+      },
+      "tested_at": "2026-07-29T22:58:20.078587+00:00",
+      "errors": [],
+      "limitations": [
+        "nvidia-smi unavailable; GPU and VRAM were not sampled",
+        "provider emitted no partial event",
+        "provider emitted no stable event"
+      ]
+    },
+    {
+      "case_id": "en_quiet_001",
+      "status": "completed",
+      "provider": "local-whisper",
+      "model": "base",
+      "model_version": "base.pt",
+      "model_metadata": {
+        "checkpoint": "base.pt",
+        "checkpoint_sha256": "ed3a0b6b1c0edf879ad9b11b1af5a0e6ab5db9205f891f668f8b0e6c6326e34e",
+        "device": "cpu",
+        "compute_type": "float32",
+        "beam_size": 5
+      },
+      "provider_response_metadata": {
+        "request_id": null,
+        "usage": null,
+        "estimated_cost": null,
+        "actual_cost": null
+      },
+      "deployment": "local",
+      "hardware": {
+        "os": "Windows-10-10.0.22631-SP0",
+        "python": "3.11.9",
+        "machine": "AMD64",
+        "processor": "Intel64 Family 6 Model 158 Stepping 11, GenuineIntel",
+        "logical_cpu_count": 4,
+        "gpus": [],
+        "gpu_sampler_available": false
+      },
+      "audio_profile": [
+        "english",
+        "quiet_microphone"
+      ],
+      "language": "en",
+      "target_language": "id",
+      "audio_duration_seconds": 3.56,
+      "accuracy": {
+        "wer": 0.0,
+        "cer": 0.0
+      },
+      "translation_evaluation": {
+        "source_input": "The local benchmark measures clear English speech.",
+        "reference_output": "Benchmark lokal mengukur ucapan bahasa Inggris yang jelas.",
+        "provider_output": null,
+        "automatic_score": null,
+        "automatic_metric": "chrF-style-character-F1",
+        "human_review_status": "pending"
+      },
+      "latency": {
+        "partial_latency_ms": null,
+        "stable_latency_ms": null,
+        "final_latency_ms": 5119.945400001598,
+        "final_latency_origin": "audio_end_event",
+        "translation_latency_ms": null,
+        "diarization_latency_ms": null,
+        "model_load_time_ms": 674.222000001464,
+        "wall_time_seconds": 5.548904900002526,
+        "real_time_factor": 1.5586811516861028
+      },
+      "resource_usage": {
+        "cpu_percent_mean": 171.60143508309136,
+        "cpu_percent_peak": 380.8154105790445,
+        "ram_mib_mean": 423.83188100961536,
+        "ram_mib_peak": 726.140625,
+        "gpu_percent_mean": null,
+        "gpu_percent_peak": null,
+        "vram_mib_mean": null,
+        "vram_mib_peak": null
+      },
+      "tested_at": "2026-07-29T22:58:26.133098+00:00",
+      "errors": [],
+      "limitations": [
+        "nvidia-smi unavailable; GPU and VRAM were not sampled",
+        "provider emitted no partial event",
+        "provider emitted no stable event"
+      ]
+    },
+    {
+      "case_id": "code_switch_001",
+      "status": "completed",
+      "provider": "local-whisper",
+      "model": "base",
+      "model_version": "base.pt",
+      "model_metadata": {
+        "checkpoint": "base.pt",
+        "checkpoint_sha256": "ed3a0b6b1c0edf879ad9b11b1af5a0e6ab5db9205f891f668f8b0e6c6326e34e",
+        "device": "cpu",
+        "compute_type": "float32",
+        "beam_size": 5
+      },
+      "provider_response_metadata": {
+        "request_id": null,
+        "usage": null,
+        "estimated_cost": null,
+        "actual_cost": null
+      },
+      "deployment": "local",
+      "hardware": {
+        "os": "Windows-10-10.0.22631-SP0",
+        "python": "3.11.9",
+        "machine": "AMD64",
+        "processor": "Intel64 Family 6 Model 158 Stepping 11, GenuineIntel",
+        "logical_cpu_count": 4,
+        "gpus": [],
+        "gpu_sampler_available": false
+      },
+      "audio_profile": [
+        "code_switching_id_en",
+        "technical_meeting"
+      ],
+      "language": "id-en",
+      "target_language": "en",
+      "audio_duration_seconds": 4.375,
+      "accuracy": {
+        "wer": 0.7777777777777778,
+        "cer": 0.3076923076923077
+      },
+      "translation_evaluation": {
+        "source_input": "Tim McIndeploy Lane and Local Seedle Equality Review Salise",
+        "reference_output": "The team will deploy the local service after the quality review is complete.",
+        "provider_output": null,
+        "automatic_score": null,
+        "automatic_metric": "chrF-style-character-F1",
+        "human_review_status": "pending"
+      },
+      "latency": {
+        "partial_latency_ms": null,
+        "stable_latency_ms": null,
+        "final_latency_ms": 6361.025599995628,
+        "final_latency_origin": "audio_end_event",
+        "translation_latency_ms": null,
+        "diarization_latency_ms": null,
+        "model_load_time_ms": 686.3143000009586,
+        "wall_time_seconds": 6.799043900005927,
+        "real_time_factor": 1.5540671771442118
+      },
+      "resource_usage": {
+        "cpu_percent_mean": 187.76876187585404,
+        "cpu_percent_peak": 379.4737834109787,
+        "ram_mib_mean": 481.1302923387097,
+        "ram_mib_peak": 751.62890625,
+        "gpu_percent_mean": null,
+        "gpu_percent_peak": null,
+        "vram_mib_mean": null,
+        "vram_mib_peak": null
+      },
+      "tested_at": "2026-07-29T22:58:31.753258+00:00",
+      "errors": [],
+      "limitations": [
+        "nvidia-smi unavailable; GPU and VRAM were not sampled",
+        "provider emitted no partial event",
+        "provider emitted no stable event"
+      ]
+    },
+    {
+      "case_id": "far_field_001",
+      "status": "completed",
+      "provider": "local-whisper",
+      "model": "base",
+      "model_version": "base.pt",
+      "model_metadata": {
+        "checkpoint": "base.pt",
+        "checkpoint_sha256": "ed3a0b6b1c0edf879ad9b11b1af5a0e6ab5db9205f891f668f8b0e6c6326e34e",
+        "device": "cpu",
+        "compute_type": "float32",
+        "beam_size": 5
+      },
+      "provider_response_metadata": {
+        "request_id": null,
+        "usage": null,
+        "estimated_cost": null,
+        "actual_cost": null
+      },
+      "deployment": "local",
+      "hardware": {
+        "os": "Windows-10-10.0.22631-SP0",
+        "python": "3.11.9",
+        "machine": "AMD64",
+        "processor": "Intel64 Family 6 Model 158 Stepping 11, GenuineIntel",
+        "logical_cpu_count": 4,
+        "gpus": [],
+        "gpu_sampler_available": false
+      },
+      "audio_profile": [
+        "far_field_meeting_room"
+      ],
+      "language": "id",
+      "target_language": null,
+      "audio_duration_seconds": 4.445,
+      "accuracy": {
+        "wer": 0.75,
+        "cer": 0.3023255813953488
+      },
+      "translation_evaluation": {
+        "source_input": "Microphone berada Jalwar Dari Pembi Cara DeRuin Repet.",
+        "reference_output": null,
+        "provider_output": null,
+        "automatic_score": null,
+        "automatic_metric": null,
+        "human_review_status": "not_applicable"
+      },
+      "latency": {
+        "partial_latency_ms": null,
+        "stable_latency_ms": null,
+        "final_latency_ms": 5708.617600001162,
+        "final_latency_origin": "audio_end_event",
+        "translation_latency_ms": null,
+        "diarization_latency_ms": null,
+        "model_load_time_ms": 675.0159000002895,
+        "wall_time_seconds": 6.156751100003021,
+        "real_time_factor": 1.3850958605181147
+      },
+      "resource_usage": {
+        "cpu_percent_mean": 184.1088946006722,
+        "cpu_percent_peak": 393.05677077944523,
+        "ram_mib_mean": 462.10630580357144,
+        "ram_mib_peak": 770.94140625,
+        "gpu_percent_mean": null,
+        "gpu_percent_peak": null,
+        "vram_mib_mean": null,
+        "vram_mib_peak": null
+      },
+      "tested_at": "2026-07-29T22:58:38.625648+00:00",
+      "errors": [],
+      "limitations": [
+        "nvidia-smi unavailable; GPU and VRAM were not sampled",
+        "provider emitted no partial event",
+        "provider emitted no stable event"
+      ]
+    },
+    {
+      "case_id": "background_noise_001",
+      "status": "completed",
+      "provider": "local-whisper",
+      "model": "base",
+      "model_version": "base.pt",
+      "model_metadata": {
+        "checkpoint": "base.pt",
+        "checkpoint_sha256": "ed3a0b6b1c0edf879ad9b11b1af5a0e6ab5db9205f891f668f8b0e6c6326e34e",
+        "device": "cpu",
+        "compute_type": "float32",
+        "beam_size": 5
+      },
+      "provider_response_metadata": {
+        "request_id": null,
+        "usage": null,
+        "estimated_cost": null,
+        "actual_cost": null
+      },
+      "deployment": "local",
+      "hardware": {
+        "os": "Windows-10-10.0.22631-SP0",
+        "python": "3.11.9",
+        "machine": "AMD64",
+        "processor": "Intel64 Family 6 Model 158 Stepping 11, GenuineIntel",
+        "logical_cpu_count": 4,
+        "gpus": [],
+        "gpu_sampler_available": false
+      },
+      "audio_profile": [
+        "background_noise"
+      ],
+      "language": "id",
+      "target_language": null,
+      "audio_duration_seconds": 4.42,
+      "accuracy": {
+        "wer": 1.0,
+        "cer": 0.3404255319148936
+      },
+      "translation_evaluation": {
+        "source_input": "System Teduk-mentadat audio saws warra lagar turun dark.",
+        "reference_output": null,
+        "provider_output": null,
+        "automatic_score": null,
+        "automatic_metric": null,
+        "human_review_status": "not_applicable"
+      },
+      "latency": {
+        "partial_latency_ms": null,
+        "stable_latency_ms": null,
+        "final_latency_ms": 5782.202900001721,
+        "final_latency_origin": "audio_end_event",
+        "translation_latency_ms": null,
+        "diarization_latency_ms": null,
+        "model_load_time_ms": 692.9563000012422,
+        "wall_time_seconds": 6.241635200000019,
+        "real_time_factor": 1.4121346606334884
+      },
+      "resource_usage": {
+        "cpu_percent_mean": 171.65597645457004,
+        "cpu_percent_peak": 380.5288302097351,
+        "ram_mib_mean": 468.9482421875,
+        "ram_mib_peak": 757.4765625,
+        "gpu_percent_mean": null,
+        "gpu_percent_peak": null,
+        "vram_mib_mean": null,
+        "vram_mib_peak": null
+      },
+      "tested_at": "2026-07-29T22:58:44.852805+00:00",
+      "errors": [],
+      "limitations": [
+        "nvidia-smi unavailable; GPU and VRAM were not sampled",
+        "provider emitted no partial event",
+        "provider emitted no stable event"
+      ]
+    },
+    {
+      "case_id": "multiple_speakers_001",
+      "status": "completed",
+      "provider": "local-whisper",
+      "model": "base",
+      "model_version": "base.pt",
+      "model_metadata": {
+        "checkpoint": "base.pt",
+        "checkpoint_sha256": "ed3a0b6b1c0edf879ad9b11b1af5a0e6ab5db9205f891f668f8b0e6c6326e34e",
+        "device": "cpu",
+        "compute_type": "float32",
+        "beam_size": 5
+      },
+      "provider_response_metadata": {
+        "request_id": null,
+        "usage": null,
+        "estimated_cost": null,
+        "actual_cost": null
+      },
+      "deployment": "local",
+      "hardware": {
+        "os": "Windows-10-10.0.22631-SP0",
+        "python": "3.11.9",
+        "machine": "AMD64",
+        "processor": "Intel64 Family 6 Model 158 Stepping 11, GenuineIntel",
+        "logical_cpu_count": 4,
+        "gpus": [],
+        "gpu_sampler_available": false
+      },
+      "audio_profile": [
+        "multiple_speakers"
+      ],
+      "language": "en",
+      "target_language": null,
+      "audio_duration_seconds": 6.585,
+      "accuracy": {
+        "wer": 0.16666666666666666,
+        "cer": 0.08695652173913043
+      },
+      "translation_evaluation": {
+        "source_input": "Speaker 1 reviews the local pipeline. Speaker 2 confirms the benchmark result.",
+        "reference_output": null,
+        "provider_output": null,
+        "automatic_score": null,
+        "automatic_metric": null,
+        "human_review_status": "not_applicable"
+      },
+      "latency": {
+        "partial_latency_ms": null,
+        "stable_latency_ms": null,
+        "final_latency_ms": 5487.093900002947,
+        "final_latency_origin": "audio_end_event",
+        "translation_latency_ms": null,
+        "diarization_latency_ms": null,
+        "model_load_time_ms": 699.7373000049265,
+        "wall_time_seconds": 5.934435499999381,
+        "real_time_factor": 0.9012050873195719
+      },
+      "resource_usage": {
+        "cpu_percent_mean": 180.42584879407926,
+        "cpu_percent_peak": 374.81870769895613,
+        "ram_mib_mean": 440.33550347222223,
+        "ram_mib_peak": 749.12890625,
+        "gpu_percent_mean": null,
+        "gpu_percent_peak": null,
+        "vram_mib_mean": null,
+        "vram_mib_peak": null
+      },
+      "tested_at": "2026-07-29T22:58:51.163778+00:00",
+      "errors": [],
+      "limitations": [
+        "nvidia-smi unavailable; GPU and VRAM were not sampled",
+        "provider emitted no partial event",
+        "provider emitted no stable event"
+      ]
+    },
+    {
+      "case_id": "overlapping_speech_001",
+      "status": "completed",
+      "provider": "local-whisper",
+      "model": "base",
+      "model_version": "base.pt",
+      "model_metadata": {
+        "checkpoint": "base.pt",
+        "checkpoint_sha256": "ed3a0b6b1c0edf879ad9b11b1af5a0e6ab5db9205f891f668f8b0e6c6326e34e",
+        "device": "cpu",
+        "compute_type": "float32",
+        "beam_size": 5
+      },
+      "provider_response_metadata": {
+        "request_id": null,
+        "usage": null,
+        "estimated_cost": null,
+        "actual_cost": null
+      },
+      "deployment": "local",
+      "hardware": {
+        "os": "Windows-10-10.0.22631-SP0",
+        "python": "3.11.9",
+        "machine": "AMD64",
+        "processor": "Intel64 Family 6 Model 158 Stepping 11, GenuineIntel",
+        "logical_cpu_count": 4,
+        "gpus": [],
+        "gpu_sampler_available": false
+      },
+      "audio_profile": [
+        "overlapping_speech",
+        "multiple_speakers"
+      ],
+      "language": "en",
+      "target_language": null,
+      "audio_duration_seconds": 4.33,
+      "accuracy": {
+        "wer": 0.3333333333333333,
+        "cer": 0.11594202898550725
+      },
+      "translation_evaluation": {
+        "source_input": "Speaker one reviews the local pipeline. Be sure to confirm the benchmark result.",
+        "reference_output": null,
+        "provider_output": null,
+        "automatic_score": null,
+        "automatic_metric": null,
+        "human_review_status": "not_applicable"
+      },
+      "latency": {
+        "partial_latency_ms": null,
+        "stable_latency_ms": null,
+        "final_latency_ms": 5580.009299999801,
+        "final_latency_origin": "audio_end_event",
+        "translation_latency_ms": null,
+        "diarization_latency_ms": null,
+        "model_load_time_ms": 685.0709999998799,
+        "wall_time_seconds": 6.026886599996942,
+        "real_time_factor": 1.3918906697452522
+      },
+      "resource_usage": {
+        "cpu_percent_mean": 173.12081718837206,
+        "cpu_percent_peak": 369.68826322149397,
+        "ram_mib_mean": 444.95200892857144,
+        "ram_mib_peak": 752.55078125,
+        "gpu_percent_mean": null,
+        "gpu_percent_peak": null,
+        "vram_mib_mean": null,
+        "vram_mib_peak": null
+      },
+      "tested_at": "2026-07-29T22:58:57.168424+00:00",
+      "errors": [],
+      "limitations": [
+        "nvidia-smi unavailable; GPU and VRAM were not sampled",
+        "provider emitted no partial event",
+        "provider emitted no stable event"
+      ]
+    }
+  ],
+  "run_limitations": []
+}

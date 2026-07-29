@@ -106,10 +106,15 @@ def test_local_is_default_and_cloud_requires_explicit_key_and_consent():
 
 def test_production_validation_rejects_implicit_or_private_cloud():
     with unittest.TestCase().assertRaisesRegex(ValueError, "API_KEY"):
-        validate_startup_configuration(Settings(_env_file=None, live_final_provider="openai"))
+        validate_startup_configuration(Settings(
+            _env_file=None, app_env="production", release_profile="production-hybrid",
+            live_transcription_provider="openai", live_final_provider="openai",
+        ))
     with unittest.TestCase().assertRaisesRegex(ValueError, "Private"):
         validate_startup_configuration(Settings(
-            _env_file=None, live_final_provider="openai", openai_api_key="secret",
+            _env_file=None, app_env="production", release_profile="production-hybrid",
+            live_transcription_provider="openai", live_final_provider="openai",
+            openai_api_key="secret",
             openai_external_audio_consent=True, security_profile="Private",
         ))
 

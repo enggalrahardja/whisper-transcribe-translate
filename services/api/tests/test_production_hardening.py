@@ -23,6 +23,8 @@ from app.services.live_sessions import create_live_session, record_disconnect
 
 
 def settings(**values):
+    if values.get("app_env") == "production":
+        values.setdefault("release_profile", "production-local")
     return Settings(_env_file=None, **values)
 
 

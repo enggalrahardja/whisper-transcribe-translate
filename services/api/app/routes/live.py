@@ -57,6 +57,12 @@ from ..services.transcript_postprocessing import (
     TranscriptPostprocessSnapshot,
     TranscriptPostprocessStatus,
 )
+from ..services.processing_worker import (
+    InProcessWorker,
+    JobPriority,
+    ProcessingJob,
+    WorkerBackpressureError,
+)
 from ..services.live_sessions import (
     create_live_session,
     fail_live_session,
@@ -124,6 +130,7 @@ _translation_queue: LocalLiveTranslationQueue | None = None
 _translation_quality_queue: LocalTranslationQualityQueue | None = None
 _diarization_queue: LocalSpeakerDiarizationQueue | None = None
 _transcript_postprocess_queue: LocalTranscriptPostprocessQueue | None = None
+_live_processing_worker: InProcessWorker[tuple, tuple] | None = None
 _segment_glossaries: dict[
     tuple[str, str], GlossarySnapshot | DisabledGlossarySnapshot | None
 ] = {}
@@ -241,6 +248,43 @@ def _get_transcript_postprocess_queue() -> LocalTranscriptPostprocessQueue:
     return _transcript_postprocess_queue
 
 
+def _get_live_processing_worker() -> InProcessWorker[tuple, tuple]:
+    global _live_processing_worker
+    if _live_processing_worker is None:
+        _live_processing_worker = InProcessWorker(
+            "live_transcription",
+            _execute_live_transcription_job,
+            capacity=_runtime_settings.live_processing_worker_queue_capacity,
+            concurrency=_runtime_settings.live_processing_worker_concurrency,
+        )
+    return _live_processing_worker
+
+
+async def _execute_live_transcription_job(payload: tuple) -> tuple:
+    session_id, window, glossary, detailed_enabled = payload
+    if detailed_enabled:
+        detailed = await asyncio.to_thread(
+            transcribe_pcm_window_detailed, session_id, window, glossary
+        )
+        return detailed.session, detailed.duplicate, detailed
+    session, duplicate = await asyncio.to_thread(transcribe_pcm_window, session_id, window)
+    return session, duplicate, None
+
+
+async def startup_processing_workers() -> None:
+    await _get_live_processing_worker().start()
+    if _runtime_settings.live_accurate_final_enabled:
+        _get_final_queue()
+    if _runtime_settings.live_translation_enabled:
+        _get_translation_queue()
+    if _runtime_settings.live_translation_quality_enabled:
+        _get_translation_quality_queue()
+    if _runtime_settings.live_diarization_enabled:
+        _get_diarization_queue()
+    if _runtime_settings.live_transcript_postprocess_enabled:
+        _get_transcript_postprocess_queue()
+
+
 async def shutdown_final_transcription_queue() -> None:
     global _final_queue
     queue, _final_queue = _final_queue, None
@@ -274,6 +318,21 @@ async def shutdown_transcript_postprocess_queue() -> None:
     queue, _transcript_postprocess_queue = _transcript_postprocess_queue, None
     if queue is not None:
         await queue.close()
+
+
+async def shutdown_processing_workers() -> None:
+    global _live_processing_worker
+    if _pcm_tasks:
+        await asyncio.gather(*tuple(_pcm_tasks.values()), return_exceptions=True)
+    worker, _live_processing_worker = _live_processing_worker, None
+    if worker is not None:
+        await worker.shutdown(drain=True)
+    session_ids = set(_connections) | set(_pcm_tasks) | set(_pcm_task_locks)
+    for session_id in session_ids:
+        _pcm_registry.remove(session_id)
+        _vad_registry.remove(session_id)
+        _live_state_registry.remove(session_id)
+    _segment_glossaries.clear()
 
 
 class SpeakerRenameRequest(BaseModel):
@@ -395,21 +454,23 @@ async def _transcribe_vad_segments(
             else None
         )
         try:
-            detailed: PcmTranscriptionResult | None = None
-            if _runtime_settings.live_transcript_state_enabled:
-                detailed = await asyncio.to_thread(
-                    transcribe_pcm_window_detailed,
-                    session_id,
-                    segment.window,
-                    glossary,
-                )
-                session, duplicate = detailed.session, detailed.duplicate
-            else:
-                session, duplicate = await asyncio.to_thread(
-                    transcribe_pcm_window,
-                    session_id,
-                    segment.window,
-                )
+            worker = _get_live_processing_worker()
+            await worker.start()
+            live_job = ProcessingJob(
+                job_id=f"live:{session_id}:{segment.window.start_sequence}:{segment.window.end_sequence}",
+                job_type="live_transcription", session_id=session_id,
+                segment_id=f"pcm-{segment.window.start_sequence}-{segment.window.end_sequence}",
+                revision=1, priority=JobPriority.LIVE, max_retries=0,
+                timeout_ms=_runtime_settings.live_processing_worker_timeout_ms,
+                payload=(session_id, segment.window, glossary, _runtime_settings.live_transcript_state_enabled),
+            )
+            session, duplicate, detailed = await worker.submit_and_wait(live_job)
+        except WorkerBackpressureError as exc:
+            await _send_to_current_connection(
+                session_id,
+                _event("error", message=str(exc), retryable=True, backpressure=True),
+            )
+            return False
         except Exception as exc:
             failed = await asyncio.to_thread(
                 fail_live_session,
@@ -916,6 +977,8 @@ async def _finish_pcm_session(session_id: str) -> None:
         _pcm_task_locks.pop(session_id, None)
     _pcm_registry.remove(session_id)
     _vad_registry.remove(session_id)
+    if _live_processing_worker is not None:
+        await _live_processing_worker.cancel_session(session_id)
     if not _runtime_settings.live_accurate_final_enabled:
         _live_state_registry.remove(session_id)
 
@@ -928,6 +991,51 @@ def create_session(payload: CreateLiveSessionRequest) -> LiveSessionResponse:
 @router.get("/api/live/sessions", response_model=list[LiveSessionResponse])
 def get_sessions(limit: int = Query(default=20, ge=1, le=100)) -> list[LiveSessionResponse]:
     return list_live_sessions(limit)
+
+
+def _specialized_worker_health(name: str, queue: object | None, enabled: bool) -> dict[str, object]:
+    if queue is None:
+        return {
+            "name": name, "running": False, "ready": not enabled,
+            "queueDepth": 0, "capacity": 0, "activeJobs": 0,
+            "modelLoaded": False, "lastSuccess": None, "lastFailure": None,
+        }
+    metrics = queue.metrics()
+    config = queue.config
+    snapshots = tuple(getattr(queue, "_jobs", {}).values())
+    status_values = [getattr(getattr(item, "status", None), "value", "") for item in snapshots]
+    successes = [getattr(item, "updated_at", None) for item in snapshots if getattr(getattr(item, "status", None), "value", "") == "completed"]
+    failures = [getattr(item, "updated_at", None) for item in snapshots if getattr(getattr(item, "status", None), "value", "") == "failed"]
+    model_owner = getattr(queue, "transcriber", None) or getattr(queue, "translator", None) or getattr(queue, "embedder", None)
+    model_loaded = any(
+        getattr(model_owner, attribute, None) is not None
+        for attribute in ("_model", "_classifier")
+    ) if model_owner is not None else True
+    return {
+        "name": name, "running": True, "ready": True,
+        "queueDepth": metrics.get("queue_depth", 0),
+        "capacity": config.queue_capacity, "activeJobs": status_values.count("processing"),
+        "modelLoaded": model_loaded,
+        "modelLoadTimeMs": metrics.get("model_load_time_ms", 0),
+        "lastSuccess": max(successes).isoformat() if successes else None,
+        "lastFailure": max(failures).isoformat() if failures else None,
+        "completed": metrics.get("completed", metrics.get("processed_quality_jobs", 0)),
+        "failed": metrics.get("failed", metrics.get("failed_jobs", 0)),
+        "retried": metrics.get("retries", 0),
+    }
+
+
+@router.get("/api/live/workers/health")
+def processing_worker_health() -> dict[str, object]:
+    workers = {
+        "live_transcription": _get_live_processing_worker().health(),
+        "accurate_final_transcription": _specialized_worker_health("accurate_final_transcription", _final_queue, _runtime_settings.live_accurate_final_enabled),
+        "translation": _specialized_worker_health("translation", _translation_queue, _runtime_settings.live_translation_enabled),
+        "translation_quality": _specialized_worker_health("translation_quality", _translation_quality_queue, _runtime_settings.live_translation_quality_enabled),
+        "diarization": _specialized_worker_health("diarization", _diarization_queue, _runtime_settings.live_diarization_enabled),
+        "transcript_postprocessing": _specialized_worker_health("transcript_postprocessing", _transcript_postprocess_queue, _runtime_settings.live_transcript_postprocess_enabled),
+    }
+    return {"ready": all(bool(worker["ready"]) for worker in workers.values()), "workers": workers}
 
 
 @router.post("/api/live/glossary/reload")

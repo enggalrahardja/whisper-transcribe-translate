@@ -280,3 +280,21 @@ process-local result.
 Both flags default off. No production schema, Whisper model/default, provider,
 LLM, or cloud integration changed. See
 `docs/stage10-transcript-postprocessing.md`.
+
+## Stage 11 addendum
+
+Stage 11 introduces a reusable shared job contract and bounded priority worker
+kernel. PCM/VAD transcription now uses a dedicated live worker; accurate-final,
+translation, translation quality, diarization, and transcript post-processing
+retain independent specialized queues and lazy persistent model ownership.
+This separation prevents heavy final work from consuming live capacity.
+
+Application startup brings up the live worker and initializes enabled queue
+boundaries. Graceful shutdown stops acceptance, drains or cancels safely,
+closes each worker independently, and clears session PCM/VAD/semantic/glossary
+runtime buffers. Session cleanup cancels outstanding live jobs. A consolidated
+health/readiness endpoint reports all six workers, queue/backpressure state,
+activity, model state, success/failure, and processing metrics.
+
+The architecture remains local-first and schema-neutral. Queue state is still
+in-process and non-durable. See `docs/stage11-processing-workers.md`.

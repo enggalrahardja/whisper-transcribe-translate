@@ -88,6 +88,9 @@ class Settings(BaseSettings):
     live_transcript_postprocess_max_retries: int = 1
     live_transcript_postprocess_worker_concurrency: int = 1
     live_transcript_postprocess_queue_capacity: int = 64
+    live_processing_worker_concurrency: int = 1
+    live_processing_worker_queue_capacity: int = 32
+    live_processing_worker_timeout_ms: int = 30_000
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

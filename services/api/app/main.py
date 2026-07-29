@@ -14,6 +14,7 @@ from .routes.live import (
     shutdown_final_transcription_queue,
     shutdown_live_translation_queue,
     shutdown_translation_quality_queue,
+    shutdown_speaker_diarization_queue,
 )
 from .routes.settings import router as settings_router
 from .routes.subtitles import router as subtitles_router
@@ -49,6 +50,7 @@ async def lifespan(_: FastAPI):
         await shutdown_final_transcription_queue()
         await shutdown_live_translation_queue()
         await shutdown_translation_quality_queue()
+        await shutdown_speaker_diarization_queue()
         close_database()
 
 

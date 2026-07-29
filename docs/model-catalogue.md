@@ -40,6 +40,16 @@ acoustic accuracy. It is disabled by default.
 |---|---|---|---|---|---|---|---|---|---|---|
 | Stage 8 deterministic rules, repository revision | Post-process only completed local translations: punctuation, capitalization, whitespace, repeated phrases, and terminology | Unclassified; this is formatting/constraint enforcement, not an accuracy model | No; bounded asynchronous final-result job | Language-neutral formatting with configured glossary target forms | No | Negligible CPU/RAM relative to translation inference; no GPU required | Source/final translation and glossary remain local | local rule-based code — no per-request fee; normal infrastructure costs remain | Automated rule, safety, queue, fallback, and integration tests pass; internal human quality review not run | Cannot repair semantic mistranslation; conservative invariant checks cover digits, listed negations, and recognized speaker patterns rather than full semantic equivalence |
 
+## Implemented local diarization model
+
+| Model/version | Functionality | Accuracy classification | Streaming support | Translation support | Diarization | Hardware requirement | Privacy implication | Pricing | Benchmark status | Known limitations |
+|---|---|---|---|---|---|---|---|---|---|---|
+| SpeechBrain `speechbrain/spkrec-ecapa-voxceleb`, exact downloaded Hugging Face commit recorded | Local speaker embeddings plus session-level online cosine clustering and assignment | Unclassified; upstream VoxCeleb results are not an internal application result | Asynchronous processing of completed VAD segments; not partial-chunk or token streaming | No; assignment is independent from translation | Yes, one dominant speaker assignment per final segment with renameable session-local IDs | CPU supported; CUDA optional; about 90 MB model download plus PyTorch/SpeechBrain runtime and embedding state | Final segment audio and speaker embeddings stay on the host | local model — no per-request fee; infrastructure, storage, electricity, and operations still cost money | Automated lifecycle, isolation, mapping, invariant, and queue tests pass; exact-checkpoint synthetic CPU embedding smoke passes; internal diarization benchmark and microphone E2E pending | Overlapping speech is not separated; online order-dependent clustering; confidence is not calibrated; short/noisy/far-field speech unmeasured; runtime mappings do not survive process restart |
+
+The component is disabled by default and only consumes completed PCM + VAD
+segments. See `docs/stage9-local-speaker-diarization.md` for metadata,
+configuration, confidence semantics, failure behavior, and validation status.
+
 ## Implemented translation providers
 
 | Provider/model version | Functionality | Accuracy classification | Streaming support | Translation support | Diarization | Hardware requirement | Privacy implication | Pricing | Benchmark status | Known limitations |

@@ -69,6 +69,17 @@ class Settings(BaseSettings):
     live_translation_quality_max_retries: int = 1
     live_translation_quality_worker_concurrency: int = 1
     live_translation_quality_queue_capacity: int = 64
+    live_diarization_enabled: bool = False
+    live_diarization_model: str = "speechbrain/spkrec-ecapa-voxceleb"
+    live_diarization_model_revision: str = "main"
+    live_diarization_device: str = "auto"
+    live_diarization_compute_type: str = "auto"
+    live_diarization_similarity_threshold: float = 0.72
+    live_diarization_low_confidence_threshold: float = 0.65
+    live_diarization_timeout_seconds: float = 30.0
+    live_diarization_max_retries: int = 1
+    live_diarization_worker_concurrency: int = 1
+    live_diarization_queue_capacity: int = 64
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

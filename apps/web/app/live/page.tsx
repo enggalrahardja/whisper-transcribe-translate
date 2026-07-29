@@ -182,6 +182,51 @@ type TranslationQualityMetrics = {
   retries: number;
   queueDepth: number;
 };
+type SpeakerAssignment = {
+  provider: string;
+  model: string;
+  checkpoint: string;
+  localCloud: "local" | "cloud";
+  device: string;
+  computeType: string;
+  speakerId: string;
+  speakerLabel: string;
+  confidence: number;
+  embeddingVersion: string;
+  clusteringRevision: number;
+  latencyMs: number;
+  startMs: number;
+  endMs: number;
+  createdAt: string;
+  updatedAt: string;
+};
+type DiarizationResult = {
+  jobId: string;
+  sessionId: string;
+  segmentId: string;
+  status: "pending" | "processing" | "completed" | "failed";
+  sequenceStart: number;
+  sequenceEnd: number;
+  startMs: number;
+  endMs: number;
+  attempt: number;
+  assignment?: SpeakerAssignment | null;
+  error?: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+type DiarizationMetrics = {
+  jobs: number;
+  detectedSpeakers: number;
+  assignedSegments: number;
+  unassignedSegments: number;
+  lowConfidence: number;
+  retries: number;
+  failures: number;
+  processingLatencyMs: number;
+  queueDepth: number;
+  renameCount: number;
+};
 
 const audioTransport: AudioTransport = process.env.NEXT_PUBLIC_LIVE_AUDIO_TRANSPORT === "pcm" ? "pcm" : "legacy";
 const liveTranscriptStateEnabled = process.env.NEXT_PUBLIC_LIVE_TRANSCRIPT_STATE_ENABLED === "true";
@@ -190,6 +235,8 @@ const liveTranslationEnabled = process.env.NEXT_PUBLIC_LIVE_TRANSLATION_ENABLED 
 const usesLiveTranslation = usesLiveTranscriptState && liveTranslationEnabled;
 const liveTranslationQualityEnabled = process.env.NEXT_PUBLIC_LIVE_TRANSLATION_QUALITY_ENABLED === "true";
 const usesTranslationQuality = usesLiveTranslation && liveTranslationQualityEnabled;
+const liveDiarizationEnabled = process.env.NEXT_PUBLIC_LIVE_DIARIZATION_ENABLED === "true";
+const usesLiveDiarization = usesLiveTranscriptState && liveDiarizationEnabled;
 const emptyPcmMetrics: PcmTransportMetrics = {
   chunksSent: 0,
   chunksAcknowledged: 0,
@@ -260,6 +307,18 @@ const emptyTranslationQualityMetrics: TranslationQualityMetrics = {
   protectionCount: 0,
   retries: 0,
   queueDepth: 0,
+};
+const emptyDiarizationMetrics: DiarizationMetrics = {
+  jobs: 0,
+  detectedSpeakers: 0,
+  assignedSegments: 0,
+  unassignedSegments: 0,
+  lowConfidence: 0,
+  retries: 0,
+  failures: 0,
+  processingLatencyMs: 0,
+  queueDepth: 0,
+  renameCount: 0,
 };
 
 const defaultLiveSettings = {
@@ -349,6 +408,8 @@ export default function LivePage() {
   const [translationMetrics, setTranslationMetrics] = useState<TranslationMetrics>(emptyTranslationMetrics);
   const [translationQuality, setTranslationQuality] = useState<Record<string, TranslationQuality>>({});
   const [translationQualityMetrics, setTranslationQualityMetrics] = useState<TranslationQualityMetrics>(emptyTranslationQualityMetrics);
+  const [diarizationResults, setDiarizationResults] = useState<Record<string, DiarizationResult>>({});
+  const [diarizationMetrics, setDiarizationMetrics] = useState<DiarizationMetrics>(emptyDiarizationMetrics);
 
   const socketRef = useRef<WebSocket | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -503,6 +564,8 @@ export default function LivePage() {
         rawTranslatedText?: string | null;
         glossaryTermsApplied?: string[];
         qualityResults?: TranslationQuality[];
+        assignments?: DiarizationResult[];
+        assignment?: SpeakerAssignment | null;
         translationRevision?: number;
         rawModelTranslation?: string;
         rawTranslation?: string;
@@ -688,6 +751,38 @@ export default function LivePage() {
           queueDepth: event.metrics.queue_depth ?? 0,
         });
       }
+      if (event.type === "diarization_snapshot" && event.assignments) {
+        setDiarizationResults(Object.fromEntries(
+          event.assignments
+            .filter((item) => item.sessionId === sessionIdRef.current)
+            .map((item) => [item.segmentId, item]),
+        ));
+      }
+      if (
+        event.type === "diarization_state" && event.sessionId === sessionIdRef.current
+        && event.segmentId && event.jobId && event.status
+        && ["pending", "processing", "completed", "failed"].includes(event.status)
+      ) {
+        const update = event as unknown as DiarizationResult;
+        setDiarizationResults((currentItems) => ({
+          ...currentItems,
+          [update.segmentId]: update,
+        }));
+      }
+      if ((event.type === "diarization_state" || event.type === "diarization_snapshot") && event.metrics) {
+        setDiarizationMetrics({
+          jobs: event.metrics.diarization_jobs ?? 0,
+          detectedSpeakers: event.metrics.detected_speakers ?? 0,
+          assignedSegments: event.metrics.assigned_segments ?? 0,
+          unassignedSegments: event.metrics.unassigned_segments ?? 0,
+          lowConfidence: event.metrics.low_confidence_assignments ?? 0,
+          retries: event.metrics.retries ?? 0,
+          failures: event.metrics.failures ?? 0,
+          processingLatencyMs: event.metrics.processing_latency_ms ?? 0,
+          queueDepth: event.metrics.queue_depth ?? 0,
+          renameCount: event.metrics.speaker_rename_count ?? 0,
+        });
+      }
       if (event.type === "error") {
         setError(event.message ?? "Live transcription failed");
         if (event.session?.status === "failed") setUiStatus("failed");
@@ -803,6 +898,8 @@ export default function LivePage() {
     setTranslationMetrics(emptyTranslationMetrics);
     setTranslationQuality({});
     setTranslationQualityMetrics(emptyTranslationQualityMetrics);
+    setDiarizationResults({});
+    setDiarizationMetrics(emptyDiarizationMetrics);
 
     let created: LiveSession | null = null;
     try {
@@ -889,6 +986,33 @@ export default function LivePage() {
     setFinalCorrections({});
     setTranslations({});
     setTranslationQuality({});
+    setDiarizationResults({});
+  }
+
+  async function renameSpeaker(speakerId: string, currentLabel: string) {
+    const label = window.prompt(`Rename ${currentLabel}`, currentLabel)?.trim();
+    if (!label || !sessionIdRef.current || label === currentLabel) return;
+    try {
+      const response = await fetch(
+        `${apiBaseUrl}/api/live/sessions/${sessionIdRef.current}/speakers/${encodeURIComponent(speakerId)}/rename`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ label }),
+        },
+      );
+      if (!response.ok) throw new Error(await responseError(response, "Speaker could not be renamed"));
+      const renamed = await response.json() as { assignments: DiarizationResult[]; metrics?: Record<string, number> };
+      setDiarizationResults(Object.fromEntries(renamed.assignments.map((item) => [item.segmentId, item])));
+      if (renamed.metrics) {
+        setDiarizationMetrics((current) => ({
+          ...current,
+          renameCount: renamed.metrics?.speaker_rename_count ?? current.renameCount,
+        }));
+      }
+    } catch (renameError) {
+      setError(renameError instanceof Error ? renameError.message : "Speaker could not be renamed");
+    }
   }
 
   useEffect(() => {
@@ -1032,6 +1156,13 @@ export default function LivePage() {
           <div><span>Protected values</span><strong>{translationQualityMetrics.protectionCount}</strong></div>
           <div><span>Correction latency</span><strong>{translationQualityMetrics.correctionLatencyMs.toFixed(3)}ms</strong></div>
         </div> : null}
+        {usesLiveDiarization ? <div className="live-status-grid">
+          <div><span>Diarization jobs / queue</span><strong>{diarizationMetrics.jobs} / {diarizationMetrics.queueDepth}</strong></div>
+          <div><span>Speakers / assigned</span><strong>{diarizationMetrics.detectedSpeakers} / {diarizationMetrics.assignedSegments}</strong></div>
+          <div><span>Unassigned / low confidence</span><strong>{diarizationMetrics.unassignedSegments} / {diarizationMetrics.lowConfidence}</strong></div>
+          <div><span>Failures / retries / renames</span><strong>{diarizationMetrics.failures} / {diarizationMetrics.retries} / {diarizationMetrics.renameCount}</strong></div>
+          <div><span>Processing latency</span><strong>{diarizationMetrics.processingLatencyMs.toFixed(0)}ms</strong></div>
+        </div> : null}
         <div className="live-controls">
           <button disabled={!canStart} onClick={start} type="button">Start</button>
           <button className="secondary" disabled={!(["active", "paused"] as UiStatus[]).includes(uiStatus)} onClick={pauseOrResume} type="button">{uiStatus === "paused" ? "Resume" : "Pause"}</button>
@@ -1055,8 +1186,9 @@ export default function LivePage() {
         const correction = finalCorrections[segment.segmentId];
         const translation = translations[segment.segmentId];
         const quality = translationQuality[segment.segmentId];
+        const diarization = diarizationResults[segment.segmentId];
         const displayedTranslation = quality?.status === "completed" ? quality.correctedTranslation : quality?.rawTranslation ?? translation?.translatedText;
-        return <article className="segment-row" key={segment.segmentId}><span>{(segment.startMs / 1000).toFixed(2)}s to {(segment.endMs / 1000).toFixed(2)}s · {segment.state} · r{segment.revision}{correction ? ` · accurate final: ${correction.status}` : ""}</span><p>{segment.text}</p>{segment.rawText && segment.rawText !== segment.text ? <small>Raw model output: {segment.rawText}</small> : null}{segment.glossaryCorrections?.length ? <small>Glossary: {segment.glossaryCorrections.map((item) => `${item.source} → ${item.replacement}`).join(", ")}</small> : null}{correction?.status === "failed" ? <small>{correction.error ?? "Accurate final failed; live result retained."}</small> : null}{correction?.status === "completed" && correction.metadata ? <small>{correction.metadata.model} · {correction.metadata.device}/{correction.metadata.computeType} · beam {correction.metadata.beamSize}</small> : null}{translation ? <div className="translation-result"><small>Local translation · {translation.status} · r{translation.revision}{quality ? ` · quality: ${quality.status}` : ""}</small>{displayedTranslation ? <p>{displayedTranslation}</p> : null}{quality?.status === "completed" && quality.rawTranslation !== quality.correctedTranslation ? <small>Raw final translation: {quality.rawTranslation}</small> : null}{quality?.appliedCorrections?.length ? <small>Quality corrections: {quality.appliedCorrections.map((item) => item.rule).join(", ")}</small> : null}{quality?.fallback ? <small>{quality.error ?? "Quality pass failed"}; raw final translation retained.</small> : null}{translation.error ? <small>{translation.error}; source transcript retained.</small> : null}{translation.metadata ? <small>{translation.metadata.sourceLanguage}→{translation.metadata.targetLanguage} · {translation.metadata.model} · {translation.metadata.device}/{translation.metadata.computeType}</small> : null}</div> : null}</article>;
+        return <article className="segment-row" key={segment.segmentId}><span>{(segment.startMs / 1000).toFixed(2)}s to {(segment.endMs / 1000).toFixed(2)}s · {segment.state} · r{segment.revision}{correction ? ` · accurate final: ${correction.status}` : ""}</span><p>{segment.text}</p>{diarization ? <div className="speaker-assignment"><small>Speaker diarization · {diarization.status}{diarization.assignment ? ` · confidence ${diarization.assignment.confidence.toFixed(3)}` : ""}</small>{diarization.assignment ? <p><strong>{diarization.assignment.speakerLabel}</strong> <button className="secondary" type="button" onClick={() => void renameSpeaker(diarization.assignment!.speakerId, diarization.assignment!.speakerLabel)}>Rename</button></p> : diarization.status === "failed" ? <small>{diarization.error ?? "Diarization failed"}; segment remains unassigned.</small> : null}</div> : null}{segment.rawText && segment.rawText !== segment.text ? <small>Raw model output: {segment.rawText}</small> : null}{segment.glossaryCorrections?.length ? <small>Glossary: {segment.glossaryCorrections.map((item) => `${item.source} → ${item.replacement}`).join(", ")}</small> : null}{correction?.status === "failed" ? <small>{correction.error ?? "Accurate final failed; live result retained."}</small> : null}{correction?.status === "completed" && correction.metadata ? <small>{correction.metadata.model} · {correction.metadata.device}/{correction.metadata.computeType} · beam {correction.metadata.beamSize}</small> : null}{translation ? <div className="translation-result"><small>Local translation · {translation.status} · r{translation.revision}{quality ? ` · quality: ${quality.status}` : ""}</small>{displayedTranslation ? <p>{displayedTranslation}</p> : null}{quality?.status === "completed" && quality.rawTranslation !== quality.correctedTranslation ? <small>Raw final translation: {quality.rawTranslation}</small> : null}{quality?.appliedCorrections?.length ? <small>Quality corrections: {quality.appliedCorrections.map((item) => item.rule).join(", ")}</small> : null}{quality?.fallback ? <small>{quality.error ?? "Quality pass failed"}; raw final translation retained.</small> : null}{translation.error ? <small>{translation.error}; source transcript retained.</small> : null}{translation.metadata ? <small>{translation.metadata.sourceLanguage}→{translation.metadata.targetLanguage} · {translation.metadata.model} · {translation.metadata.device}/{translation.metadata.computeType}</small> : null}</div> : null}</article>;
       })}</section> : null}
 
       {!usesLiveTranscriptState && segments.length > 0 ? <section className="live-segments"><h2>Segments</h2>{segments.map((segment, index) => <article className="segment-row" key={segment.id ?? `${segment.start}-${index}`}><span>{segment.start.toFixed(2)}s → {segment.end.toFixed(2)}s</span><p>{segment.text}</p></article>)}</section> : null}

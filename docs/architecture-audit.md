@@ -240,3 +240,24 @@ Queue capacity, concurrency, retry, and timeout remain bounded. State and
 metrics are process-local and reconnectable over WebSocket. Both quality flags
 default off; no database schema, legacy behavior, model/provider selection, or
 cloud integration changed. See `docs/stage8-final-translation-quality.md`.
+
+## Stage 9 addendum
+
+Stage 9 forks each complete final VAD segment into a bounded local diarization
+queue after transcription has already produced its segment result. Enqueueing
+returns without waiting for inference, so embedding and clustering do not block
+live transcription or translation. Partial PCM chunks and the legacy recorder
+never enter this branch.
+
+A persistent local SpeechBrain ECAPA-TDNN runtime creates speaker embeddings.
+A separate session-local online clusterer assigns stable discovery-order IDs
+(`speaker-1`, `speaker-2`, and so on), while a separate overlay registry stores
+assignment metadata and renameable labels. Reconnect snapshots restore the
+current process-local assignments and names. Rename applies to all existing and
+future assignments in that session.
+
+Jobs are idempotent and queue capacity, concurrency, retries, and timeout are
+bounded. Failure leaves the segment unassigned and never mutates transcript,
+translation, or timestamps. Both feature flags default off; no production
+schema, legacy behavior, Whisper `base` default, provider, or cloud integration
+changed. See `docs/stage9-local-speaker-diarization.md`.

@@ -2,6 +2,7 @@ import asyncio
 import json
 
 from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect, status
+from pydantic import BaseModel, Field
 
 from ..config import get_settings
 from ..models.live import CreateLiveSessionRequest, LiveSessionResponse
@@ -40,6 +41,13 @@ from ..services.translation_quality import (
     TranslationQualityConfig,
     TranslationQualityRequest,
     TranslationQualitySnapshot,
+)
+from ..services.speaker_diarization import (
+    DiarizationRequest,
+    DiarizationSnapshot,
+    LocalSpeakerDiarizationQueue,
+    PersistentLocalSpeakerEmbedder,
+    SpeakerDiarizationConfig,
 )
 from ..services.live_sessions import (
     create_live_session,
@@ -106,6 +114,7 @@ _final_queue: LocalFinalTranscriptionQueue | None = None
 _glossary_manager: GlossaryManager | None = None
 _translation_queue: LocalLiveTranslationQueue | None = None
 _translation_quality_queue: LocalTranslationQualityQueue | None = None
+_diarization_queue: LocalSpeakerDiarizationQueue | None = None
 _segment_glossaries: dict[
     tuple[str, str], GlossarySnapshot | DisabledGlossarySnapshot | None
 ] = {}
@@ -179,6 +188,28 @@ def _get_translation_quality_queue() -> LocalTranslationQualityQueue:
     return _translation_quality_queue
 
 
+def _get_diarization_queue() -> LocalSpeakerDiarizationQueue:
+    global _diarization_queue
+    if _diarization_queue is None:
+        config = SpeakerDiarizationConfig(
+            model=_runtime_settings.live_diarization_model,
+            model_revision=_runtime_settings.live_diarization_model_revision,
+            device=_runtime_settings.live_diarization_device,
+            compute_type=_runtime_settings.live_diarization_compute_type,
+            similarity_threshold=_runtime_settings.live_diarization_similarity_threshold,
+            low_confidence_threshold=_runtime_settings.live_diarization_low_confidence_threshold,
+            timeout_seconds=_runtime_settings.live_diarization_timeout_seconds,
+            max_retries=_runtime_settings.live_diarization_max_retries,
+            worker_concurrency=_runtime_settings.live_diarization_worker_concurrency,
+            queue_capacity=_runtime_settings.live_diarization_queue_capacity,
+        )
+        _diarization_queue = LocalSpeakerDiarizationQueue(
+            config,
+            PersistentLocalSpeakerEmbedder(config),
+        )
+    return _diarization_queue
+
+
 async def shutdown_final_transcription_queue() -> None:
     global _final_queue
     queue, _final_queue = _final_queue, None
@@ -198,6 +229,17 @@ async def shutdown_translation_quality_queue() -> None:
     queue, _translation_quality_queue = _translation_quality_queue, None
     if queue is not None:
         await queue.close()
+
+
+async def shutdown_speaker_diarization_queue() -> None:
+    global _diarization_queue
+    queue, _diarization_queue = _diarization_queue, None
+    if queue is not None:
+        await queue.close()
+
+
+class SpeakerRenameRequest(BaseModel):
+    label: str = Field(min_length=1, max_length=80)
 
 
 def _event(event_type: str, session: LiveSessionResponse | None = None, **extra: object) -> dict:
@@ -362,6 +404,8 @@ async def _transcribe_vad_segments(
             ):
                 _segment_glossaries[(session_id, detailed.segment_id)] = glossary
             await _send_live_transcript_lifecycle(session_id, detailed, glossary)
+            if _runtime_settings.live_diarization_enabled:
+                await _enqueue_speaker_diarization(detailed, segment.window)
             if _runtime_settings.live_accurate_final_enabled:
                 await _enqueue_accurate_final(
                     session_id,
@@ -370,6 +414,61 @@ async def _transcribe_vad_segments(
                     glossary,
                 )
     return True
+
+
+async def _enqueue_speaker_diarization(
+    result: PcmTranscriptionResult,
+    window: PcmAudioWindow,
+) -> None:
+    queue = _get_diarization_queue()
+    request = DiarizationRequest(
+        session_id=result.session.session_id,
+        segment_id=result.segment_id,
+        sequence_start=result.sequence_start,
+        sequence_end=result.sequence_end,
+        start_ms=result.start_ms,
+        end_ms=result.end_ms,
+        audio_pcm16=window.audio,
+    )
+    try:
+        outcome = await queue.enqueue(request, _handle_diarization_status)
+    except (asyncio.QueueFull, ValueError) as exc:
+        await _send_to_current_connection(
+            request.session_id,
+            _event(
+                "diarization_state",
+                jobId=request.job_id,
+                sessionId=request.session_id,
+                segmentId=request.segment_id,
+                status="failed",
+                sequenceStart=request.sequence_start,
+                sequenceEnd=request.sequence_end,
+                startMs=request.start_ms,
+                endMs=request.end_ms,
+                assignment=None,
+                error=str(exc),
+                metrics=queue.metrics(),
+            ),
+        )
+        return
+    if not outcome.accepted:
+        await _send_to_current_connection(
+            request.session_id,
+            _event(
+                "diarization_state",
+                **outcome.snapshot.as_dict(),
+                duplicate=True,
+                metrics=queue.metrics(),
+            ),
+        )
+
+
+async def _handle_diarization_status(snapshot: DiarizationSnapshot) -> None:
+    queue = _get_diarization_queue()
+    await _send_to_current_connection(
+        snapshot.session_id,
+        _event("diarization_state", **snapshot.as_dict(), metrics=queue.metrics()),
+    )
 
 
 async def _send_live_transcript_lifecycle(
@@ -725,6 +824,35 @@ def reload_live_glossary() -> dict[str, object]:
     }
 
 
+@router.post("/api/live/sessions/{session_id}/speakers/{speaker_id}/rename")
+async def rename_live_speaker(
+    session_id: str,
+    speaker_id: str,
+    payload: SpeakerRenameRequest,
+) -> dict[str, object]:
+    if not _runtime_settings.live_diarization_enabled:
+        raise HTTPException(status_code=409, detail="Live speaker diarization is disabled")
+    queue = _get_diarization_queue()
+    try:
+        assignments = queue.rename(session_id, speaker_id, payload.label)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    response = {
+        "sessionId": session_id,
+        "speakerId": speaker_id,
+        "label": " ".join(payload.label.split()).strip(),
+        "assignments": [item.as_dict() for item in assignments],
+        "metrics": queue.metrics(),
+    }
+    await _send_to_current_connection(
+        session_id,
+        _event("diarization_snapshot", **response),
+    )
+    return response
+
+
 @router.get("/api/live/sessions/{session_id}", response_model=LiveSessionResponse)
 def get_session(session_id: str) -> LiveSessionResponse:
     return get_live_session(session_id)
@@ -931,6 +1059,17 @@ async def live_websocket(websocket: WebSocket, session_id: str) -> None:
                                     for item in _translation_quality_queue.snapshot(session_id)
                                 ],
                                 metrics=_translation_quality_queue.metrics(),
+                            )
+                        )
+                    if _runtime_settings.live_diarization_enabled and _diarization_queue is not None:
+                        await websocket.send_json(
+                            _event(
+                                "diarization_snapshot",
+                                assignments=[
+                                    item.as_dict()
+                                    for item in _diarization_queue.snapshot(session_id)
+                                ],
+                                metrics=_diarization_queue.metrics(),
                             )
                         )
                 elif command_type == "pcm_chunk":

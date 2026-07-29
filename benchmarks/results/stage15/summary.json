@@ -1,0 +1,285 @@
+{
+  "schemaVersion": "1.0",
+  "generatedAt": "2026-07-29T13:48:20.669188+00:00",
+  "benchmarkDate": "2026-07-29",
+  "dataset": {
+    "id": "stage15-safe-synthetic-benchmark",
+    "version": "1.0.0",
+    "cases": 7
+  },
+  "hardware": {
+    "os": "Windows-10-10.0.22631-SP0",
+    "processor": "Intel64 Family 6 Model 158 Stepping 11, GenuineIntel",
+    "logicalCpuCount": 4,
+    "python": "3.11.9",
+    "gpu": {
+      "available": false,
+      "devices": [],
+      "limitation": "NVIDIA-SMI has failed because you do not have suffient permissions. Please try running as an administrator."
+    }
+  },
+  "comparison": [
+    {
+      "component": "transcription",
+      "provider": "local-whisper",
+      "model": "base",
+      "checkpoint": "base.pt",
+      "available": true,
+      "status": "completed",
+      "cases": 7,
+      "completedCases": 7,
+      "wer": 0.5277777777777778,
+      "cer": 0.1851713020834758,
+      "partialLatencyMs": null,
+      "stableLatencyMs": null,
+      "finalLatencyMs": 7165.3572857145,
+      "realTimeFactor": 1.7552576119220402,
+      "modelLoadTimeMs": 783.5549571427691,
+      "cpuPeakPercent": 340.5944389053739,
+      "ramPeakMiB": 733.1484375,
+      "gpuPeakPercent": null,
+      "vramPeakMiB": null,
+      "failureRate": 0.0,
+      "resultReference": "benchmarks/results/stage15/base/results.json"
+    },
+    {
+      "component": "transcription",
+      "provider": "local-whisper",
+      "model": "small",
+      "checkpoint": "small.pt",
+      "available": false,
+      "status": "not_run"
+    },
+    {
+      "component": "transcription",
+      "provider": "local-whisper",
+      "model": "medium",
+      "checkpoint": "medium.pt",
+      "available": false,
+      "status": "not_run"
+    },
+    {
+      "component": "transcription",
+      "provider": "local-whisper",
+      "model": "large-v3",
+      "checkpoint": "large-v3.pt",
+      "available": false,
+      "status": "not_run"
+    },
+    {
+      "component": "transcription",
+      "provider": "local-whisper",
+      "model": "large-v3-turbo",
+      "checkpoint": "large-v3-turbo.pt",
+      "available": false,
+      "status": "not_run"
+    },
+    {
+      "component": "translation",
+      "provider": "local-transformers",
+      "model": "Helsinki-NLP/opus-mt-id-en",
+      "checkpoint": "main (exact resolved commit required at run time)",
+      "available": false,
+      "status": "not_run",
+      "dependencyAvailable": true
+    },
+    {
+      "component": "diarization",
+      "provider": "local-speechbrain",
+      "model": "speechbrain/spkrec-ecapa-voxceleb",
+      "checkpoint": "main (exact resolved commit required at run time)",
+      "available": false,
+      "status": "not_run",
+      "dependencyAvailable": true
+    }
+  ],
+  "unsupported": [
+    {
+      "component": "transcription",
+      "model": "small",
+      "reason": "checkpoint missing: storage/models/whisper/small.pt"
+    },
+    {
+      "component": "transcription",
+      "model": "medium",
+      "reason": "checkpoint missing: storage/models/whisper/medium.pt"
+    },
+    {
+      "component": "transcription",
+      "model": "large-v3",
+      "reason": "checkpoint missing: storage/models/whisper/large-v3.pt"
+    },
+    {
+      "component": "transcription",
+      "model": "large-v3-turbo",
+      "reason": "checkpoint missing: storage/models/whisper/large-v3-turbo.pt"
+    },
+    {
+      "component": "translation",
+      "model": "Helsinki-NLP/opus-mt-id-en",
+      "reason": "Marian checkpoint/dependency not available locally"
+    },
+    {
+      "component": "diarization",
+      "model": "speechbrain/spkrec-ecapa-voxceleb",
+      "reason": "ECAPA checkpoint not pinned in local benchmark cache"
+    }
+  ],
+  "profiles": {
+    "schemaVersion": "1.0",
+    "defaultProfile": "Fast",
+    "profiles": {
+      "Fast": {
+        "description": "Latency-priority local profile for common CPU hardware.",
+        "live": {
+          "model": "base",
+          "checkpoint": "base.pt",
+          "device": "auto",
+          "computeType": "auto",
+          "beamSize": 1,
+          "language": "auto"
+        },
+        "accurateFinal": {
+          "enabled": false,
+          "model": "base",
+          "checkpoint": "base.pt",
+          "device": "auto",
+          "computeType": "auto",
+          "beamSize": 1
+        },
+        "features": {
+          "pcmStreaming": false,
+          "vad": false,
+          "semanticLiveState": false,
+          "accurateFinal": false,
+          "glossary": false,
+          "translation": false,
+          "translationQuality": false,
+          "diarization": false,
+          "transcriptPostProcessing": false
+        },
+        "benchmarkReference": "benchmarks/results/stage15/summary.json",
+        "fallback": "Fast"
+      },
+      "Balanced": {
+        "description": "Balanced local profile; uses small only when its checkpoint is available.",
+        "live": {
+          "model": "small",
+          "checkpoint": "small.pt",
+          "device": "auto",
+          "computeType": "auto",
+          "beamSize": 2,
+          "language": "auto"
+        },
+        "accurateFinal": {
+          "enabled": true,
+          "model": "medium",
+          "checkpoint": "medium.pt",
+          "device": "auto",
+          "computeType": "auto",
+          "beamSize": 5
+        },
+        "features": {
+          "pcmStreaming": false,
+          "vad": false,
+          "semanticLiveState": false,
+          "accurateFinal": false,
+          "glossary": false,
+          "translation": false,
+          "translationQuality": false,
+          "diarization": false,
+          "transcriptPostProcessing": false
+        },
+        "benchmarkReference": "benchmarks/results/stage15/summary.json",
+        "fallback": "Fast"
+      },
+      "Accurate": {
+        "description": "Accuracy-priority configuration using the highest-capacity model that completed this internal run; currently base with a higher beam.",
+        "live": {
+          "model": "base",
+          "checkpoint": "base.pt",
+          "device": "auto",
+          "computeType": "auto",
+          "beamSize": 2,
+          "language": "auto"
+        },
+        "accurateFinal": {
+          "enabled": true,
+          "model": "base",
+          "checkpoint": "base.pt",
+          "device": "auto",
+          "computeType": "auto",
+          "beamSize": 5
+        },
+        "features": {
+          "pcmStreaming": false,
+          "vad": false,
+          "semanticLiveState": false,
+          "accurateFinal": false,
+          "glossary": false,
+          "translation": false,
+          "translationQuality": false,
+          "diarization": false,
+          "transcriptPostProcessing": false
+        },
+        "benchmarkReference": "benchmarks/results/stage15/summary.json",
+        "fallback": "Balanced"
+      },
+      "Private": {
+        "description": "Network-provider-free profile; all configured processing components are local.",
+        "live": {
+          "model": "base",
+          "checkpoint": "base.pt",
+          "device": "auto",
+          "computeType": "auto",
+          "beamSize": 2,
+          "language": "auto"
+        },
+        "accurateFinal": {
+          "enabled": false,
+          "model": "base",
+          "checkpoint": "base.pt",
+          "device": "auto",
+          "computeType": "auto",
+          "beamSize": 3
+        },
+        "translation": {
+          "provider": "local-marian",
+          "model": "Helsinki-NLP/opus-mt-id-en",
+          "checkpoint": "main",
+          "device": "auto",
+          "computeType": "auto",
+          "beamSize": 4,
+          "sourceLanguage": "id",
+          "targetLanguage": "en"
+        },
+        "diarization": {
+          "provider": "local-speechbrain",
+          "model": "speechbrain/spkrec-ecapa-voxceleb",
+          "checkpoint": "main",
+          "device": "auto",
+          "computeType": "auto"
+        },
+        "features": {
+          "pcmStreaming": false,
+          "vad": false,
+          "semanticLiveState": false,
+          "accurateFinal": false,
+          "glossary": false,
+          "translation": false,
+          "translationQuality": false,
+          "diarization": false,
+          "transcriptPostProcessing": false
+        },
+        "benchmarkReference": "benchmarks/results/stage15/summary.json",
+        "networkProvidersAllowed": false,
+        "fallback": "Fast"
+      }
+    }
+  },
+  "limitations": [
+    "Synthetic speech is a reproducibility fixture and does not represent natural microphone accuracy.",
+    "Offline Whisper emits final only; partial and stable latency are not applicable.",
+    "Model comparison is incomplete until all checkpoints run on this exact dataset and hardware."
+  ]
+}

@@ -26,6 +26,10 @@ class ErrorRateTests(unittest.TestCase):
     def test_character_deletion(self):
         self.assertEqual(benchmark_run.error_rate("abc", "ac", unit="character"), 1 / 3)
 
+    def test_translation_chrf(self):
+        self.assertEqual(benchmark_run.translation_chrf("Halo dunia", "halo dunia"), 100.0)
+        self.assertLess(benchmark_run.translation_chrf("halo dunia", "good morning"), 50.0)
+
 
 class ManifestTests(unittest.TestCase):
     def test_repository_manifest_is_valid_with_disabled_placeholders(self):
@@ -88,7 +92,7 @@ class RunnerIntegrationTests(unittest.TestCase):
                 manifest=manifest_path, provider="fixture", model="fixture-model",
                 model_version="1", deployment="local",
                 provider_command=f'"{sys.executable}" "{provider}"',
-                output_dir=output_dir, case=None, timeout_seconds=10.0, sample_interval=0.05,
+                output_dir=output_dir, case=None, timeout_seconds=10.0, sample_interval=0.05, beam_size=5,
             )
             self.assertEqual(benchmark_run.command_run(args), 0)
             payload = json.loads((output_dir / "results.json").read_text(encoding="utf-8"))

@@ -1,7 +1,9 @@
 # Benchmark dataset
 
-`manifest.json` is the source of truth. Audio and reference content are not
-committed at Stage 1 because no reviewed, non-sensitive corpus was supplied.
+`manifest.json` is the source of truth. Stage 15 adds repository-authored,
+non-sensitive synthetic audio and references checked against the exact speech
+synthesis scripts. The fixture is intended for reproducibility and relative
+smoke comparisons; it is not evidence of natural meeting-room accuracy.
 
 Recommended recording format is lossless mono PCM WAV. Preserve an original
 copy outside the repository if transformations are used, and record the actual

@@ -1,0 +1,1 @@
+The local benchmark measures clear English speech.

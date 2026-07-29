@@ -18,9 +18,10 @@ Each enabled case in `dataset/manifest.json` must have:
   translation is evaluated;
 - provenance, consent/licence, and an SHA-256 digest in the manifest.
 
-The committed manifest contains disabled placeholders for all required audio
-profiles. Replace or extend them with safe material; do not enable a case until
-its references have been reviewed by a second person.
+The Stage 15 manifest contains repository-authored synthetic fixtures covering
+all required profiles. References were checked against the exact synthesis
+scripts. These fixtures are reproducible smoke/relative-comparison data, not a
+substitute for a separately consented natural-speech evaluation corpus.
 
 ## Provider event contract
 
@@ -76,6 +77,21 @@ python benchmarks/run.py run `
   --provider-command "python path/to/provider_adapter.py" `
   --output-dir benchmarks/results/local-base
 ```
+
+Stage 15 reproducible run and comparison collection:
+
+```powershell
+python benchmarks/run.py validate
+python benchmarks/run.py run --provider local-whisper --model base --model-version base.pt `
+  --deployment local --provider-command "python benchmarks/providers/current_whisper.py" `
+  --beam-size 5 --output-dir benchmarks/results/stage15/base
+python benchmarks/stage15.py --output-dir benchmarks/results/stage15
+```
+
+Repeat the runner command with `small`, `medium`, `large-v3`, and
+`large-v3-turbo` only after the exact checkpoint is present. The collector
+records missing checkpoints and local translation/diarization dependencies as
+unsupported instead of silently substituting a model.
 
 Install `psutil` in the benchmark environment for child-process CPU/RAM
 sampling. NVIDIA GPU/VRAM sampling uses `nvidia-smi` when available. Missing

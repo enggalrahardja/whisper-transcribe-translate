@@ -3,6 +3,13 @@
 Accuracy classification uses **Unclassified** until the internal suite has
 enabled, reviewed cases and produces results. No model is labelled “best”.
 
+Stage 15 produced the first synthetic internal baseline for `base`: mean WER
+0.5278 and CER 0.1852 across 7/7 completed cases on dataset
+`stage15-safe-synthetic-benchmark` v1.0.0 (2026-07-29). This is a **synthetic
+baseline only**, not a natural-speech rating. Other checkpoints/components were
+unavailable and remain unclassified. Full language, licence, privacy, pricing,
+hardware, and limitations are in `docs/stage15-internal-benchmark-model-profiles.md`.
+
 ## Implemented local transcription models
 
 All five entries use the repository's PyTorch OpenAI Whisper runtime. They

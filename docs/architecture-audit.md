@@ -1,5 +1,14 @@
 # Existing architecture audit — Stage 1
 
+## Stage 15 addendum — benchmark evidence and profiles
+
+Stage 15 leaves legacy processing unchanged. The Stage 1 runner now executes a
+reviewed-script synthetic dataset and captures model-load time with accuracy,
+latency, and resources. `config/model-profiles.json` defines Fast, Balanced,
+Accurate, and Private; the resolver verifies checkpoints/CUDA and uses explicit
+local fallbacks. No profile auto-activates and no cloud provider was added.
+Only `base.pt` was available; all other results remain explicitly `not_run`.
+
 Audit date: 2026-07-27. This document describes implemented behavior, not the
 aspirational architecture in `README.md` or `PLAN.md`.
 

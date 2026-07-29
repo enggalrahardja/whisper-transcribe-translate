@@ -1,0 +1,41 @@
+{
+  "schemaVersion": "1.0",
+  "defaultProfile": "Fast",
+  "profiles": {
+    "Fast": {
+      "description": "Latency-priority local profile for common CPU hardware.",
+      "live": {"model": "base", "checkpoint": "base.pt", "device": "auto", "computeType": "auto", "beamSize": 1, "language": "auto"},
+      "accurateFinal": {"enabled": false, "model": "base", "checkpoint": "base.pt", "device": "auto", "computeType": "auto", "beamSize": 1},
+      "features": {"pcmStreaming": false, "vad": false, "semanticLiveState": false, "accurateFinal": false, "glossary": false, "translation": false, "translationQuality": false, "diarization": false, "transcriptPostProcessing": false},
+      "benchmarkReference": "benchmarks/results/stage15/summary.json",
+      "fallback": "Fast"
+    },
+    "Balanced": {
+      "description": "Balanced local profile; uses small only when its checkpoint is available.",
+      "live": {"model": "small", "checkpoint": "small.pt", "device": "auto", "computeType": "auto", "beamSize": 2, "language": "auto"},
+      "accurateFinal": {"enabled": true, "model": "medium", "checkpoint": "medium.pt", "device": "auto", "computeType": "auto", "beamSize": 5},
+      "features": {"pcmStreaming": false, "vad": false, "semanticLiveState": false, "accurateFinal": false, "glossary": false, "translation": false, "translationQuality": false, "diarization": false, "transcriptPostProcessing": false},
+      "benchmarkReference": "benchmarks/results/stage15/summary.json",
+      "fallback": "Fast"
+    },
+    "Accurate": {
+      "description": "Accuracy-priority configuration using the highest-capacity model that completed this internal run; currently base with a higher beam.",
+      "live": {"model": "base", "checkpoint": "base.pt", "device": "auto", "computeType": "auto", "beamSize": 2, "language": "auto"},
+      "accurateFinal": {"enabled": true, "model": "base", "checkpoint": "base.pt", "device": "auto", "computeType": "auto", "beamSize": 5},
+      "features": {"pcmStreaming": false, "vad": false, "semanticLiveState": false, "accurateFinal": false, "glossary": false, "translation": false, "translationQuality": false, "diarization": false, "transcriptPostProcessing": false},
+      "benchmarkReference": "benchmarks/results/stage15/summary.json",
+      "fallback": "Balanced"
+    },
+    "Private": {
+      "description": "Network-provider-free profile; all configured processing components are local.",
+      "live": {"model": "base", "checkpoint": "base.pt", "device": "auto", "computeType": "auto", "beamSize": 2, "language": "auto"},
+      "accurateFinal": {"enabled": false, "model": "base", "checkpoint": "base.pt", "device": "auto", "computeType": "auto", "beamSize": 3},
+      "translation": {"provider": "local-marian", "model": "Helsinki-NLP/opus-mt-id-en", "checkpoint": "main", "device": "auto", "computeType": "auto", "beamSize": 4, "sourceLanguage": "id", "targetLanguage": "en"},
+      "diarization": {"provider": "local-speechbrain", "model": "speechbrain/spkrec-ecapa-voxceleb", "checkpoint": "main", "device": "auto", "computeType": "auto"},
+      "features": {"pcmStreaming": false, "vad": false, "semanticLiveState": false, "accurateFinal": false, "glossary": false, "translation": false, "translationQuality": false, "diarization": false, "transcriptPostProcessing": false},
+      "benchmarkReference": "benchmarks/results/stage15/summary.json",
+      "networkProvidersAllowed": false,
+      "fallback": "Fast"
+    }
+  }
+}

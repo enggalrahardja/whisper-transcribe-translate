@@ -47,7 +47,8 @@ EMPTY_CSV_FIELDS = [
     "translation_evaluation.provider_output", "translation_evaluation.automatic_score",
     "translation_evaluation.human_review_status",
     "latency.partial_latency_ms", "latency.stable_latency_ms", "latency.final_latency_ms",
-    "latency.final_latency_origin", "latency.wall_time_seconds", "latency.real_time_factor",
+    "latency.final_latency_origin", "latency.translation_latency_ms", "latency.diarization_latency_ms",
+    "latency.model_load_time_ms", "latency.wall_time_seconds", "latency.real_time_factor",
     "resource_usage.cpu_percent_mean", "resource_usage.cpu_percent_peak",
     "resource_usage.ram_mib_mean", "resource_usage.ram_mib_peak",
     "resource_usage.gpu_percent_mean", "resource_usage.gpu_percent_peak",
@@ -90,6 +91,27 @@ def error_rate(reference: str, hypothesis: str, *, unit: str) -> float | None:
     if not reference_units:
         return 0.0 if not hypothesis_units else None
     return _edit_distance(reference_units, hypothesis_units) / len(reference_units)
+
+
+def translation_chrf(reference: str, hypothesis: str, *, max_order: int = 6) -> float | None:
+    """Deterministic character n-gram F-score (chrF-style, scaled 0..100)."""
+    reference = _normalize_text(reference).replace(" ", "")
+    hypothesis = _normalize_text(hypothesis).replace(" ", "")
+    if not reference:
+        return 100.0 if not hypothesis else None
+    if not hypothesis:
+        return 0.0
+    scores: list[float] = []
+    for order in range(1, min(max_order, len(reference), len(hypothesis)) + 1):
+        ref = [reference[i:i + order] for i in range(len(reference) - order + 1)]
+        hyp = [hypothesis[i:i + order] for i in range(len(hypothesis) - order + 1)]
+        ref_counts = {item: ref.count(item) for item in set(ref)}
+        hyp_counts = {item: hyp.count(item) for item in set(hyp)}
+        overlap = sum(min(count, hyp_counts.get(item, 0)) for item, count in ref_counts.items())
+        precision = overlap / len(hyp)
+        recall = overlap / len(ref)
+        scores.append(0.0 if not precision or not recall else 2 * precision * recall / (precision + recall))
+    return statistics.fmean(scores) * 100 if scores else 0.0
 
 
 def _load_manifest(path: Path) -> dict[str, Any]:
@@ -259,10 +281,13 @@ class ResourceSampler:
             psutil = None
             self.limitations.append("psutil unavailable; process CPU and RAM were not sampled")
         process = None
+        previous_cpu_seconds: float | None = None
+        previous_cpu_sample = time.perf_counter()
         if psutil is not None:
             try:
                 process = psutil.Process(self.pid)
-                process.cpu_percent(None)
+                times = process.cpu_times()
+                previous_cpu_seconds = times.user + times.system
             except psutil.Error:
                 process = None
         gpu_supported = _query_gpu() is not None
@@ -272,7 +297,13 @@ class ResourceSampler:
             if process is not None:
                 try:
                     processes = [process, *process.children(recursive=True)]
-                    self.cpu.append(sum(item.cpu_percent(None) for item in processes))
+                    sampled_at = time.perf_counter()
+                    total_cpu_seconds = sum(item.cpu_times().user + item.cpu_times().system for item in processes)
+                    if previous_cpu_seconds is not None:
+                        elapsed = sampled_at - previous_cpu_sample
+                        self.cpu.append(max(0.0, total_cpu_seconds - previous_cpu_seconds) / elapsed * 100 if elapsed > 0 else 0.0)
+                    previous_cpu_seconds = total_cpu_seconds
+                    previous_cpu_sample = sampled_at
                     self.ram_mib.append(sum(item.memory_info().rss for item in processes) / (1024 * 1024))
                 except psutil.Error:
                     process = None
@@ -335,6 +366,7 @@ def _run_case(case: dict[str, Any], manifest_path: Path, args: argparse.Namespac
         "BENCHMARK_LANGUAGE": str(case.get("language") or "auto"),
         "BENCHMARK_TARGET_LANGUAGE": str(case.get("target_language") or ""),
         "BENCHMARK_MODEL": args.model,
+        "BENCHMARK_BEAM_SIZE": str(getattr(args, "beam_size", 5)),
         "BENCHMARK_CASE_ID": case["id"],
     })
     started_at = datetime.now(timezone.utc)
@@ -396,7 +428,7 @@ def _run_case(case: dict[str, Any], manifest_path: Path, args: argparse.Namespac
             try:
                 event = json.loads(line)
                 event_type = event.get("event")
-                if event_type not in {"partial", "stable", "translation", "audio_end", "final"}:
+                if event_type not in {"partial", "stable", "translation", "diarization", "model_loaded", "audio_end", "final"}:
                     raise ValueError("unsupported event")
                 if event_type not in events:
                     events[event_type] = {**event, "observed_seconds": time.perf_counter() - start}
@@ -452,6 +484,13 @@ def _run_case(case: dict[str, Any], manifest_path: Path, args: argparse.Namespac
         "provider": args.provider,
         "model": args.model,
         "model_version": args.model_version,
+        "model_metadata": {
+            "checkpoint": events.get("model_loaded", {}).get("checkpoint"),
+            "checkpoint_sha256": events.get("model_loaded", {}).get("checkpoint_sha256"),
+            "device": events.get("model_loaded", {}).get("device"),
+            "compute_type": events.get("model_loaded", {}).get("compute_type"),
+            "beam_size": events.get("model_loaded", {}).get("beam_size", getattr(args, "beam_size", 5)),
+        },
         "deployment": args.deployment,
         "hardware": _hardware(),
         "audio_profile": case["profiles"],
@@ -466,7 +505,8 @@ def _run_case(case: dict[str, Any], manifest_path: Path, args: argparse.Namespac
             "source_input": hypothesis or None,
             "reference_output": reference_translation,
             "provider_output": translation_hypothesis,
-            "automatic_score": None,
+            "automatic_score": translation_chrf(reference_translation, translation_hypothesis) if reference_translation is not None and translation_hypothesis is not None else None,
+            "automatic_metric": "chrF-style-character-F1" if reference_translation is not None else None,
             "human_review_status": "pending" if reference_translation is not None else "not_applicable",
         },
         "latency": {
@@ -474,6 +514,9 @@ def _run_case(case: dict[str, Any], manifest_path: Path, args: argparse.Namespac
             "stable_latency_ms": events.get("stable", {}).get("observed_seconds", None) * 1000 if "stable" in events else None,
             "final_latency_ms": final_latency,
             "final_latency_origin": latency_origin,
+            "translation_latency_ms": events.get("translation", {}).get("observed_seconds", None) * 1000 if "translation" in events else None,
+            "diarization_latency_ms": events.get("diarization", {}).get("observed_seconds", None) * 1000 if "diarization" in events else None,
+            "model_load_time_ms": events.get("model_loaded", {}).get("latency_ms"),
             "wall_time_seconds": wall_seconds,
             "real_time_factor": wall_seconds / duration if duration and duration > 0 else None,
         },
@@ -522,8 +565,8 @@ def _report(payload: dict[str, Any]) -> str:
         f"- Started: {payload['started_at']}",
         f"- Cases: {len(records)}",
         "",
-        "| Case | Status | WER | CER | Partial ms | Stable ms | Final ms | RTF | CPU peak % | RAM peak MiB | GPU peak % | VRAM peak MiB |",
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| Case | Status | WER | CER | Partial ms | Stable ms | Final ms | Load ms | RTF | CPU peak % | RAM peak MiB | GPU peak % | VRAM peak MiB |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     def display(value: Any) -> str:
         return "n/a" if value is None else f"{value:.3f}" if isinstance(value, float) else str(value)
@@ -531,7 +574,7 @@ def _report(payload: dict[str, Any]) -> str:
         lines.append("| " + " | ".join([
             record["case_id"], record["status"], display(record["accuracy"]["wer"]), display(record["accuracy"]["cer"]),
             display(record["latency"]["partial_latency_ms"]), display(record["latency"]["stable_latency_ms"]),
-            display(record["latency"]["final_latency_ms"]), display(record["latency"]["real_time_factor"]),
+            display(record["latency"]["final_latency_ms"]), display(record["latency"].get("model_load_time_ms")), display(record["latency"]["real_time_factor"]),
             display(record["resource_usage"]["cpu_percent_peak"]), display(record["resource_usage"]["ram_mib_peak"]),
             display(record["resource_usage"]["gpu_percent_peak"]), display(record["resource_usage"]["vram_mib_peak"]),
         ]) + " |")
@@ -599,11 +642,12 @@ def command_run(args: argparse.Namespace) -> int:
             results.append({
                 "case_id": case["id"], "status": "failed", "provider": args.provider,
                 "model": args.model, "model_version": args.model_version, "deployment": args.deployment,
+                "model_metadata": {"checkpoint": None, "checkpoint_sha256": None, "device": None, "compute_type": None, "beam_size": getattr(args, "beam_size", 5)},
                 "hardware": _hardware(), "audio_profile": case.get("profiles", []),
                 "language": case.get("language"), "target_language": case.get("target_language"),
                 "audio_duration_seconds": None, "accuracy": {"wer": None, "cer": None},
-                "translation_evaluation": {"source_input": None, "reference_output": None, "provider_output": None, "automatic_score": None, "human_review_status": "not_run"},
-                "latency": {"partial_latency_ms": None, "stable_latency_ms": None, "final_latency_ms": None, "final_latency_origin": None, "wall_time_seconds": None, "real_time_factor": None},
+                "translation_evaluation": {"source_input": None, "reference_output": None, "provider_output": None, "automatic_score": None, "automatic_metric": None, "human_review_status": "not_run"},
+                "latency": {"partial_latency_ms": None, "stable_latency_ms": None, "final_latency_ms": None, "final_latency_origin": None, "translation_latency_ms": None, "diarization_latency_ms": None, "model_load_time_ms": None, "wall_time_seconds": None, "real_time_factor": None},
                 "resource_usage": {key: None for key in ("cpu_percent_mean", "cpu_percent_peak", "ram_mib_mean", "ram_mib_peak", "gpu_percent_mean", "gpu_percent_peak", "vram_mib_mean", "vram_mib_peak")},
                 "tested_at": datetime.now(timezone.utc).isoformat(), "errors": [f"{type(exc).__name__}: {exc}"], "limitations": [],
             })
@@ -613,7 +657,7 @@ def command_run(args: argparse.Namespace) -> int:
         "started_at": started.isoformat(),
         "completed_at": datetime.now(timezone.utc).isoformat(),
         "dataset": {"id": manifest.get("dataset_id"), "version": manifest.get("dataset_version"), "manifest": manifest_display},
-        "configuration": {"provider": args.provider, "model": args.model, "model_version": args.model_version, "deployment": args.deployment, "provider_command": args.provider_command},
+        "configuration": {"provider": args.provider, "model": args.model, "model_version": args.model_version, "deployment": args.deployment, "beam_size": args.beam_size, "provider_command": args.provider_command},
         "execution": {"isolation": "one_provider_process_per_case", "cold_start_included": True, "sample_interval_seconds": args.sample_interval, "timeout_seconds": args.timeout_seconds},
         "results": results,
         "run_limitations": ["No enabled dataset cases; populate reviewed non-sensitive audio and references before measuring."] if not cases else [],
@@ -640,6 +684,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--case", action="append", help="run only this enabled case (repeatable)")
     run.add_argument("--timeout-seconds", type=float, default=1800.0)
     run.add_argument("--sample-interval", type=float, default=0.2)
+    run.add_argument("--beam-size", type=int, default=5)
     run.set_defaults(handler=command_run)
     return parser
 
@@ -651,7 +696,7 @@ def main() -> int:
         args.manifest = args.manifest.resolve()
     if hasattr(args, "output_dir"):
         args.output_dir = args.output_dir.resolve()
-    if getattr(args, "timeout_seconds", 1) <= 0 or getattr(args, "sample_interval", 1) <= 0:
+    if getattr(args, "timeout_seconds", 1) <= 0 or getattr(args, "sample_interval", 1) <= 0 or getattr(args, "beam_size", 1) <= 0:
         parser.error("timeout and sample interval must be positive")
     return args.handler(args)
 

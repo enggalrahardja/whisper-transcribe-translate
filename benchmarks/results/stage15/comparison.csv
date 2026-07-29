@@ -1,0 +1,8 @@
+available,cases,cer,checkpoint,completedCases,component,cpuPeakPercent,dependencyAvailable,failureRate,finalLatencyMs,gpuPeakPercent,model,modelLoadTimeMs,partialLatencyMs,provider,ramPeakMiB,realTimeFactor,resultReference,stableLatencyMs,status,vramPeakMiB,wer
+True,7,0.1851713020834758,base.pt,7,transcription,340.5944389053739,,0.0,7165.3572857145,,base,783.5549571427691,,local-whisper,733.1484375,1.7552576119220402,benchmarks/results/stage15/base/results.json,,completed,,0.5277777777777778
+False,,,small.pt,,transcription,,,,,,small,,,local-whisper,,,,,not_run,,
+False,,,medium.pt,,transcription,,,,,,medium,,,local-whisper,,,,,not_run,,
+False,,,large-v3.pt,,transcription,,,,,,large-v3,,,local-whisper,,,,,not_run,,
+False,,,large-v3-turbo.pt,,transcription,,,,,,large-v3-turbo,,,local-whisper,,,,,not_run,,
+False,,,main (exact resolved commit required at run time),,translation,,True,,,,Helsinki-NLP/opus-mt-id-en,,,local-transformers,,,,,not_run,,
+False,,,main (exact resolved commit required at run time),,diarization,,True,,,,speechbrain/spkrec-ecapa-voxceleb,,,local-speechbrain,,,,,not_run,,

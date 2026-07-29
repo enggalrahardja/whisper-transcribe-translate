@@ -1,5 +1,7 @@
 import asyncio
+import hashlib
 import json
+import platform
 
 from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect, status
 from pydantic import BaseModel, Field
@@ -62,6 +64,10 @@ from ..services.processing_worker import (
     JobPriority,
     ProcessingJob,
     WorkerBackpressureError,
+)
+from ..services.pipeline_persistence import (
+    MongoPipelineRepository,
+    PipelinePersistenceService,
 )
 from ..services.live_sessions import (
     create_live_session,
@@ -131,6 +137,7 @@ _translation_quality_queue: LocalTranslationQualityQueue | None = None
 _diarization_queue: LocalSpeakerDiarizationQueue | None = None
 _transcript_postprocess_queue: LocalTranscriptPostprocessQueue | None = None
 _live_processing_worker: InProcessWorker[tuple, tuple] | None = None
+_persistence_service: PipelinePersistenceService | None = None
 _segment_glossaries: dict[
     tuple[str, str], GlossarySnapshot | DisabledGlossarySnapshot | None
 ] = {}
@@ -260,6 +267,24 @@ def _get_live_processing_worker() -> InProcessWorker[tuple, tuple]:
     return _live_processing_worker
 
 
+def _get_persistence_service() -> PipelinePersistenceService | None:
+    global _persistence_service
+    if not _runtime_settings.live_pipeline_persistence_enabled:
+        return None
+    if _persistence_service is None:
+        _persistence_service = PipelinePersistenceService(
+            MongoPipelineRepository(),
+            capacity=_runtime_settings.live_pipeline_persistence_queue_capacity,
+            max_retries=_runtime_settings.live_pipeline_persistence_max_retries,
+        )
+    return _persistence_service
+
+
+def _persist(kind: str, value: dict) -> bool:
+    service = _get_persistence_service()
+    return service.submit(kind, value) if service is not None else False
+
+
 async def _execute_live_transcription_job(payload: tuple) -> tuple:
     session_id, window, glossary, detailed_enabled = payload
     if detailed_enabled:
@@ -283,6 +308,13 @@ async def startup_processing_workers() -> None:
         _get_diarization_queue()
     if _runtime_settings.live_transcript_postprocess_enabled:
         _get_transcript_postprocess_queue()
+    persistence = _get_persistence_service()
+    if persistence is not None:
+        try:
+            await asyncio.to_thread(persistence.repository.ensure_indexes)
+        except Exception:
+            pass
+        await persistence.start()
 
 
 async def shutdown_final_transcription_queue() -> None:
@@ -321,7 +353,7 @@ async def shutdown_transcript_postprocess_queue() -> None:
 
 
 async def shutdown_processing_workers() -> None:
-    global _live_processing_worker
+    global _live_processing_worker, _persistence_service
     if _pcm_tasks:
         await asyncio.gather(*tuple(_pcm_tasks.values()), return_exceptions=True)
     worker, _live_processing_worker = _live_processing_worker, None
@@ -333,6 +365,9 @@ async def shutdown_processing_workers() -> None:
         _vad_registry.remove(session_id)
         _live_state_registry.remove(session_id)
     _segment_glossaries.clear()
+    persistence, _persistence_service = _persistence_service, None
+    if persistence is not None:
+        await persistence.close()
 
 
 class SpeakerRenameRequest(BaseModel):
@@ -465,6 +500,18 @@ async def _transcribe_vad_segments(
                 payload=(session_id, segment.window, glossary, _runtime_settings.live_transcript_state_enabled),
             )
             session, duplicate, detailed = await worker.submit_and_wait(live_job)
+            _persist("job", worker._jobs[live_job.job_id].as_dict())
+            persisted_segment_id = detailed.segment_id if detailed is not None else live_job.segment_id
+            _persist("segment", {
+                "sessionId": session_id, "segmentId": persisted_segment_id,
+                "sequenceStart": segment.window.start_sequence,
+                "sequenceEnd": segment.window.end_sequence,
+                "startMs": segment.window.start_ms, "endMs": segment.window.end_ms,
+                "durationMs": segment.window.end_ms - segment.window.start_ms,
+                "audioReference": f"runtime://{session_id}/{persisted_segment_id}",
+                "audioSha256": hashlib.sha256(segment.window.audio).hexdigest(),
+                "finalizedReason": segment.reason,
+            })
         except WorkerBackpressureError as exc:
             await _send_to_current_connection(
                 session_id,
@@ -496,6 +543,19 @@ async def _transcribe_vad_segments(
                 sequenceEnd=segment.window.end_sequence,
             ),
         )
+        _persist("transcript", {
+            "sessionId": update.session_id, "segmentId": update.segment_id,
+            "revision": update.revision, "state": update.state.value,
+            "sourceType": "live", "rawText": update.raw_text or update.text,
+            "glossaryCorrectedText": update.text, "postProcessedText": None,
+            "language": update.language,
+            "modelMetadata": {"provider": "whisper", "model": update.model, "localCloud": "local"},
+            "glossaryVersion": update.glossary_version,
+            "corrections": list(update.glossary_corrections),
+            "latencyMs": update.latency_ms,
+            "sequenceStart": update.sequence_start, "sequenceEnd": update.sequence_end,
+            "startMs": update.start_ms, "endMs": update.end_ms,
+        })
         if detailed is not None and not detailed.duplicate:
             if (
                 _runtime_settings.live_accurate_final_enabled
@@ -567,6 +627,18 @@ async def _enqueue_speaker_diarization(
 
 async def _handle_diarization_status(snapshot: DiarizationSnapshot) -> None:
     queue = _get_diarization_queue()
+    if snapshot.assignment is not None:
+        assignment = snapshot.assignment.as_dict()
+        _persist("speaker", {
+            "sessionId": snapshot.session_id, "segmentId": snapshot.segment_id,
+            "speakerId": assignment["speakerId"], "speakerLabel": assignment["speakerLabel"],
+            "confidence": assignment["confidence"],
+            "modelMetadata": {
+                key: assignment.get(key) for key in
+                ("provider", "model", "checkpoint", "localCloud", "device", "computeType", "embeddingVersion")
+            },
+            "clusteringRevision": assignment["clusteringRevision"],
+        })
     await _send_to_current_connection(
         snapshot.session_id,
         _event("diarization_state", **snapshot.as_dict(), metrics=queue.metrics()),
@@ -684,6 +756,28 @@ async def _handle_transcript_postprocess_status(
     snapshot: TranscriptPostprocessSnapshot,
 ) -> None:
     queue = _get_transcript_postprocess_queue()
+    if (
+        snapshot.status is TranscriptPostprocessStatus.COMPLETED
+        and (
+            snapshot.source_kind == "accurate_final"
+            or not _runtime_settings.live_accurate_final_enabled
+        )
+    ):
+        _persist("transcript", {
+            "sessionId": snapshot.session_id, "segmentId": snapshot.segment_id,
+            "revision": snapshot.source_revision + 1, "state": "final",
+            "sourceType": "post_processed",
+            "rawText": snapshot.raw_transcript,
+            "glossaryCorrectedText": snapshot.glossary_corrected_transcript,
+            "postProcessedText": snapshot.post_processed_transcript,
+            "language": snapshot.language,
+            "modelMetadata": {"provider": "local-rules", "model": snapshot.model, "localCloud": "local"},
+            "glossaryVersion": snapshot.glossary_version,
+            "corrections": [item.as_dict() for item in snapshot.applied_corrections],
+            "latencyMs": snapshot.latency_ms,
+            "sequenceStart": snapshot.sequence_start, "sequenceEnd": snapshot.sequence_end,
+            "startMs": snapshot.start_ms, "endMs": snapshot.end_ms,
+        })
     await _send_to_current_connection(
         snapshot.session_id,
         _event("transcript_postprocess_state", **snapshot.as_dict(), metrics=queue.metrics()),
@@ -747,6 +841,19 @@ async def _enqueue_live_translation(
 
 async def _handle_translation_status(snapshot: TranslationSnapshot) -> None:
     queue = _get_translation_queue()
+    if snapshot.status in {TranslationStatus.PREVIEW, TranslationStatus.COMPLETED, TranslationStatus.FAILED}:
+        data = snapshot.as_dict()
+        _persist("translation", {
+            "sessionId": snapshot.session_id, "segmentId": snapshot.segment_id,
+            "revision": snapshot.translation_revision, "status": snapshot.status.value,
+            "rawTranslation": data.get("rawTranslatedText"),
+            "correctedTranslation": data.get("translatedText"),
+            "sourceLanguage": data.get("metadata", {}).get("sourceLanguage") if isinstance(data.get("metadata"), dict) else None,
+            "targetLanguage": data.get("metadata", {}).get("targetLanguage") if isinstance(data.get("metadata"), dict) else None,
+            "contextSegmentIds": data.get("metadata", {}).get("contextSegmentIds", []) if isinstance(data.get("metadata"), dict) else [],
+            "glossaryVersion": data.get("metadata", {}).get("glossaryVersion") if isinstance(data.get("metadata"), dict) else None,
+            "modelMetadata": data.get("metadata"), "latencyMs": data.get("latencyMs", 0),
+        })
     await _send_to_current_connection(
         snapshot.session_id,
         _event("translation_state", **snapshot.as_dict(), metrics=queue.metrics()),
@@ -919,6 +1026,21 @@ async def _handle_final_job_status(snapshot: FinalJobSnapshot) -> None:
             if outcome.accepted:
                 queue.record_replacement()
                 payload["update"] = corrected.as_dict()
+                _persist("transcript", {
+                    "sessionId": corrected.session_id, "segmentId": corrected.segment_id,
+                    "revision": corrected.revision, "state": "final",
+                    "sourceType": "accurate_final",
+                    "rawText": corrected.raw_text or corrected.text,
+                    "glossaryCorrectedText": corrected.text,
+                    "postProcessedText": None, "language": corrected.language,
+                    "modelMetadata": snapshot.result.metadata.as_dict(),
+                    "glossaryVersion": corrected.glossary_version,
+                    "corrections": list(corrected.glossary_corrections),
+                    "latencyMs": corrected.latency_ms,
+                    "sequenceStart": corrected.sequence_start,
+                    "sequenceEnd": corrected.sequence_end,
+                    "startMs": corrected.start_ms, "endMs": corrected.end_ms,
+                })
                 if _runtime_settings.live_transcript_postprocess_enabled:
                     await _enqueue_transcript_postprocess(
                         corrected,
@@ -984,8 +1106,31 @@ async def _finish_pcm_session(session_id: str) -> None:
 
 
 @router.post("/api/live/sessions", response_model=LiveSessionResponse, status_code=status.HTTP_201_CREATED)
-def create_session(payload: CreateLiveSessionRequest) -> LiveSessionResponse:
-    return create_live_session(payload)
+async def create_session(payload: CreateLiveSessionRequest) -> LiveSessionResponse:
+    session = create_live_session(payload)
+    now = session.created_at
+    _persist("session", {
+        "sessionId": session.session_id, "status": session.status,
+        "sourceType": "live_microphone", "sourceLanguage": session.language,
+        "targetLanguage": _runtime_settings.live_translation_target_language if _runtime_settings.live_translation_enabled else None,
+        "startedAt": now, "endedAt": None, "createdAt": now, "updatedAt": now,
+        "featureFlags": {
+            "pcm": _runtime_settings.live_pcm_streaming_enabled,
+            "vad": _runtime_settings.live_vad_enabled,
+            "accurateFinal": _runtime_settings.live_accurate_final_enabled,
+            "translation": _runtime_settings.live_translation_enabled,
+            "translationQuality": _runtime_settings.live_translation_quality_enabled,
+            "diarization": _runtime_settings.live_diarization_enabled,
+            "transcriptPostprocess": _runtime_settings.live_transcript_postprocess_enabled,
+        },
+        "configuration": {
+            "liveModel": session.model, "finalModel": _runtime_settings.live_final_model,
+            "translationModel": _runtime_settings.live_translation_model,
+            "diarizationModel": _runtime_settings.live_diarization_model,
+        },
+        "hardware": {"platform": platform.platform(), "processor": platform.processor()},
+    })
+    return session
 
 
 @router.get("/api/live/sessions", response_model=list[LiveSessionResponse])
@@ -1071,6 +1216,9 @@ async def rename_live_speaker(
         "assignments": [item.as_dict() for item in assignments],
         "metrics": queue.metrics(),
     }
+    persistence = _get_persistence_service()
+    if persistence is not None:
+        await persistence.rename_speaker(session_id, speaker_id, response["label"])
     await _send_to_current_connection(
         session_id,
         _event("diarization_snapshot", **response),
@@ -1087,6 +1235,16 @@ def get_session(session_id: str) -> LiveSessionResponse:
 async def stop_session(session_id: str) -> LiveSessionResponse:
     await _finish_pcm_session(session_id)
     session = await asyncio.to_thread(stop_live_session, session_id)
+    _persist("session", {
+        "sessionId": session.session_id, "status": session.status,
+        "endedAt": session.ended_at, "updatedAt": session.updated_at,
+        "qualityMetrics": {
+            "translationQuality": _translation_quality_queue.metrics() if _translation_quality_queue is not None else None,
+            "transcriptPostprocess": _transcript_postprocess_queue.metrics() if _transcript_postprocess_queue is not None else None,
+            "diarization": _diarization_queue.metrics() if _diarization_queue is not None else None,
+            "persistence": _persistence_service.metrics() if _persistence_service is not None else None,
+        },
+    })
     async with _connections_lock:
         websocket = _connections.pop(session_id, None)
     if websocket is not None:
@@ -1235,13 +1393,41 @@ async def live_websocket(websocket: WebSocket, session_id: str) -> None:
                         _runtime_settings.live_vad_enabled
                         and _runtime_settings.live_transcript_state_enabled
                     ):
+                        runtime_updates = [
+                            update.as_dict()
+                            for update in _live_state_registry.snapshot(session_id)
+                        ]
+                        if not runtime_updates:
+                            persistence = _get_persistence_service()
+                            if persistence is not None:
+                                try:
+                                    restored = await persistence.restore(session_id)
+                                    latest: dict[str, dict] = {}
+                                    for item in restored.get("transcriptRevisions", []):
+                                        current = latest.get(item["segmentId"])
+                                        if current is None or item["revision"] > current["revision"]:
+                                            latest[item["segmentId"]] = item
+                                    runtime_updates = [
+                                        {
+                                            "sessionId": item["sessionId"], "segmentId": item["segmentId"],
+                                            "revision": item["revision"], "state": item["state"],
+                                            "sequenceStart": item.get("sequenceStart", 0), "sequenceEnd": item.get("sequenceEnd", 0),
+                                            "startMs": item.get("startMs", 0), "endMs": item.get("endMs", 0),
+                                            "text": item.get("postProcessedText") or item.get("glossaryCorrectedText") or item.get("rawText", ""),
+                                            "rawText": item.get("rawText"), "language": item.get("language", "auto"),
+                                            "model": item.get("modelMetadata", {}).get("model", "base"),
+                                            "latencyMs": item.get("latencyMs", 0),
+                                            "glossaryVersion": item.get("glossaryVersion"),
+                                            "glossaryCorrections": item.get("corrections", []),
+                                        }
+                                        for item in latest.values()
+                                    ]
+                                except Exception:
+                                    runtime_updates = []
                         await websocket.send_json(
                             _event(
                                 "transcript_state_snapshot",
-                                updates=[
-                                    update.as_dict()
-                                    for update in _live_state_registry.snapshot(session_id)
-                                ],
+                                updates=runtime_updates,
                                 metrics=_live_state_registry.metrics(session_id),
                                 glossaryMetrics=(
                                     _get_glossary_manager().metrics()

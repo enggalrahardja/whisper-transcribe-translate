@@ -298,3 +298,24 @@ activity, model state, success/failure, and processing metrics.
 
 The architecture remains local-first and schema-neutral. Queue state is still
 in-process and non-durable. See `docs/stage11-processing-workers.md`.
+
+## Stage 12 addendum
+
+Stage 12 adds versioned Mongo persistence behind an opt-in write-behind service
+and repository boundary. Sessions capture allow-listed feature, configuration,
+hardware, quality, and model context. Segment documents retain finalized audio
+metadata/reference/SHA-256 but never raw PCM chunks. Immutable transcript and
+translation revisions preserve raw and derived values; accurate-final and
+post-processing append revisions. Speaker mappings and job summaries remain
+separate entities.
+
+Unique indexes and idempotent repository operations reject conflicting or
+regressing revisions. Recursive redaction excludes credential-like keys.
+Bounded retry and degraded-session metrics isolate persistence failure from PCM
+ingestion. Reconnect prefers runtime state and falls back to the newest
+persisted revision per segment when runtime state is unavailable.
+
+Persistence remains optional and is not a durable processing queue. No legacy
+storage is removed, no raw chunk is stored in Mongo, and no cloud/provider or
+production behavior changes while the flag is off. See
+`docs/stage12-session-segment-persistence.md`.

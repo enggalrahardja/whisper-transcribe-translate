@@ -91,6 +91,9 @@ class Settings(BaseSettings):
     live_processing_worker_concurrency: int = 1
     live_processing_worker_queue_capacity: int = 32
     live_processing_worker_timeout_ms: int = 30_000
+    live_pipeline_persistence_enabled: bool = False
+    live_pipeline_persistence_queue_capacity: int = 256
+    live_pipeline_persistence_max_retries: int = 2
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

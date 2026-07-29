@@ -120,6 +120,19 @@ class Settings(BaseSettings):
     live_pipeline_persistence_enabled: bool = False
     live_pipeline_persistence_queue_capacity: int = 256
     live_pipeline_persistence_max_retries: int = 2
+    live_transcription_provider: str = "local"
+    live_final_provider: str = "local"
+    openai_api_key: str = ""
+    openai_live_model: str = "gpt-realtime-whisper"
+    openai_final_model: str = "gpt-4o-transcribe"
+    openai_base_url: str = "https://api.openai.com/v1"
+    openai_realtime_url: str = "wss://api.openai.com/v1/realtime"
+    openai_timeout_seconds: float = 30.0
+    openai_max_retries: int = 2
+    openai_rate_limit_per_minute: int = 30
+    openai_allow_local_fallback: bool = False
+    openai_external_audio_consent: bool = False
+    openai_pricing_catalogue_path: Path = PROJECT_ROOT / "config/openai-pricing.json"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
@@ -134,6 +147,14 @@ class Settings(BaseSettings):
     @field_validator("live_glossary_path", mode="before")
     @classmethod
     def resolve_live_glossary_path(cls, value: str | Path) -> Path:
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            path = PROJECT_ROOT / path
+        return path.resolve()
+
+    @field_validator("openai_pricing_catalogue_path", mode="before")
+    @classmethod
+    def resolve_openai_pricing_catalogue_path(cls, value: str | Path) -> Path:
         path = Path(value).expanduser()
         if not path.is_absolute():
             path = PROJECT_ROOT / path
@@ -180,6 +201,26 @@ def validate_startup_configuration(settings: Settings) -> None:
         raise ValueError("Worker queue capacity exceeds the configured production maximum")
     if settings.security_profile not in {"Fast", "Balanced", "Accurate", "Private"}:
         raise ValueError("Unsupported security profile")
+    providers = {settings.live_transcription_provider, settings.live_final_provider}
+    if not providers <= {"local", "openai"}:
+        raise ValueError("Transcription providers must be local or openai")
+    if "openai" in providers:
+        if not settings.openai_api_key.strip():
+            raise ValueError("OPENAI_API_KEY is required when OpenAI is selected")
+        if not settings.openai_external_audio_consent:
+            raise ValueError("External audio consent is required when OpenAI is selected")
+        if settings.security_profile == "Private":
+            raise ValueError("Private profile cannot use a cloud transcription provider")
+    if settings.live_transcription_provider == "openai" and not (
+        settings.live_pcm_streaming_enabled
+        and settings.live_vad_enabled
+        and settings.live_transcript_state_enabled
+    ):
+        raise ValueError("OpenAI live provider requires PCM streaming, VAD, and semantic transcript state")
+    if settings.openai_timeout_seconds <= 0 or settings.openai_max_retries not in range(0, 11):
+        raise ValueError("OpenAI timeout/retry configuration is invalid")
+    if settings.openai_rate_limit_per_minute <= 0:
+        raise ValueError("OpenAI rate limit must be positive")
     if settings.app_env.lower() != "production":
         return
     import json

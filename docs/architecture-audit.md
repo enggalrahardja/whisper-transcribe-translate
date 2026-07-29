@@ -364,3 +364,19 @@ warning thresholds without affecting processing outputs. Polling pauses while
 the browser tab is hidden. Runtime metrics remain non-durable and the contract
 is shaped for a later Prometheus/OpenTelemetry exporter. See
 `docs/stage14-quality-monitoring.md`.
+
+## Stage 17 addendum
+
+Stage 17 adds a provider-neutral transcription boundary with `local` as the
+unchanged default and an explicit, API-only `openai` option. Live cloud audio
+uses a server-side Realtime connection; PCM16 mono 16 kHz remains canonical and
+is resampled only at the provider boundary. Provider events enter the existing
+semantic revision registry. Accurate-final cloud requests enter the existing
+bounded correction queue and preserve local/live output on failure.
+
+Cloud activation requires an API key and external-audio consent. Provider and
+consent snapshots are persisted without secrets. There is no implicit local to
+cloud fallback; optional cloud to local fallback is explicit. Pricing is a
+dated catalogue independent of accuracy, and the Stage 15-compatible cloud
+adapter is gated by key, billing approval, and dataset-transfer approval. See
+`docs/stage17-openai-provider.md`.

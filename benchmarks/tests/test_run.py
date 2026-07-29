@@ -71,6 +71,7 @@ class RunnerIntegrationTests(unittest.TestCase):
                 "print(json.dumps({'event': 'audio_end'}), flush=True)\n"
                 "print(json.dumps({'event': 'partial', 'text': 'halo'}), flush=True)\n"
                 "print(json.dumps({'event': 'stable', 'text': 'halo dunia'}), flush=True)\n"
+                "print(json.dumps({'event': 'provider_metadata', 'request_id': 'req_fixture', 'usage': {'input_tokens': 10}}), flush=True)\n"
                 "print(json.dumps({'event': 'final', 'text': 'halo dunia'}), flush=True)\n",
                 encoding="utf-8",
             )
@@ -99,6 +100,7 @@ class RunnerIntegrationTests(unittest.TestCase):
             self.assertEqual(payload["results"][0]["accuracy"]["wer"], 0.0)
             self.assertEqual(payload["results"][0]["accuracy"]["cer"], 0.0)
             self.assertEqual(payload["results"][0]["latency"]["final_latency_origin"], "audio_end_event")
+            self.assertEqual(payload["results"][0]["provider_response_metadata"]["request_id"], "req_fixture")
             self.assertTrue((output_dir / "results.csv").is_file())
             self.assertTrue((output_dir / "report.md").is_file())
 

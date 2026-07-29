@@ -428,7 +428,7 @@ def _run_case(case: dict[str, Any], manifest_path: Path, args: argparse.Namespac
             try:
                 event = json.loads(line)
                 event_type = event.get("event")
-                if event_type not in {"partial", "stable", "translation", "diarization", "model_loaded", "audio_end", "final"}:
+                if event_type not in {"partial", "stable", "translation", "diarization", "model_loaded", "provider_metadata", "audio_end", "final"}:
                     raise ValueError("unsupported event")
                 if event_type not in events:
                     events[event_type] = {**event, "observed_seconds": time.perf_counter() - start}
@@ -490,6 +490,12 @@ def _run_case(case: dict[str, Any], manifest_path: Path, args: argparse.Namespac
             "device": events.get("model_loaded", {}).get("device"),
             "compute_type": events.get("model_loaded", {}).get("compute_type"),
             "beam_size": events.get("model_loaded", {}).get("beam_size", getattr(args, "beam_size", 5)),
+        },
+        "provider_response_metadata": {
+            "request_id": events.get("provider_metadata", {}).get("request_id"),
+            "usage": events.get("provider_metadata", {}).get("usage"),
+            "estimated_cost": events.get("provider_metadata", {}).get("estimated_cost"),
+            "actual_cost": events.get("provider_metadata", {}).get("actual_cost"),
         },
         "deployment": args.deployment,
         "hardware": _hardware(),

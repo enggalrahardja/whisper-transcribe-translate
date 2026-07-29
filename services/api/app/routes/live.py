@@ -25,6 +25,13 @@ from ..services.final_transcription import (
     LocalFinalTranscriptionQueue,
     PersistentLocalFinalTranscriber,
 )
+from ..services.transcription_providers import (
+    LocalTranscriptionProvider,
+    OpenAIProviderConfig,
+    OpenAITranscriptionProvider,
+    PricingCatalogue,
+    ProviderLiveEvent,
+)
 from ..services.glossary import (
     DisabledGlossarySnapshot,
     GlossaryManager,
@@ -148,6 +155,10 @@ _diarization_queue: LocalSpeakerDiarizationQueue | None = None
 _transcript_postprocess_queue: LocalTranscriptPostprocessQueue | None = None
 _live_processing_worker: InProcessWorker[tuple, tuple] | None = None
 _persistence_service: PipelinePersistenceService | None = None
+_openai_provider: OpenAITranscriptionProvider | None = None
+_openai_live_sessions: dict[str, object] = {}
+_openai_pending_boundaries: dict[str, list[tuple[PcmAudioWindow, float, object]]] = {}
+_openai_item_boundaries: dict[tuple[str, str], tuple[PcmAudioWindow, float, object]] = {}
 _segment_glossaries: dict[
     tuple[str, str], GlossarySnapshot | DisabledGlossarySnapshot | None
 ] = {}
@@ -185,9 +196,45 @@ def _get_final_queue() -> LocalFinalTranscriptionQueue:
             worker_concurrency=_runtime_settings.live_final_worker_concurrency,
             queue_capacity=_runtime_settings.live_final_queue_capacity,
         )
-        transcriber = PersistentLocalFinalTranscriber(config)
+        local_transcriber = PersistentLocalFinalTranscriber(config)
+        if _runtime_settings.live_final_provider == "openai":
+            provider = _get_openai_provider(
+                local_fallback=local_transcriber if _runtime_settings.openai_allow_local_fallback else None
+            )
+            transcriber = provider.final_transcriber
+            config = FinalTranscriptionConfig(
+                model=config.model, device=config.device, compute_type=config.compute_type,
+                beam_size=config.beam_size, timeout_seconds=config.timeout_seconds,
+                max_retries=0, worker_concurrency=config.worker_concurrency,
+                queue_capacity=config.queue_capacity,
+            )
+        else:
+            transcriber = LocalTranscriptionProvider(local_transcriber)
         _final_queue = LocalFinalTranscriptionQueue(config, transcriber)
     return _final_queue
+
+
+def _get_openai_provider(*, local_fallback=None) -> OpenAITranscriptionProvider:
+    global _openai_provider
+    if _openai_provider is None:
+        config = OpenAIProviderConfig(
+            api_key=_runtime_settings.openai_api_key,
+            live_model=_runtime_settings.openai_live_model,
+            final_model=_runtime_settings.openai_final_model,
+            base_url=_runtime_settings.openai_base_url,
+            realtime_url=_runtime_settings.openai_realtime_url,
+            timeout_seconds=_runtime_settings.openai_timeout_seconds,
+            max_retries=_runtime_settings.openai_max_retries,
+            rate_limit_per_minute=_runtime_settings.openai_rate_limit_per_minute,
+            external_audio_consent=_runtime_settings.openai_external_audio_consent,
+        )
+        _openai_provider = OpenAITranscriptionProvider(
+            config, PricingCatalogue(_runtime_settings.openai_pricing_catalogue_path),
+            local_fallback=local_fallback,
+        )
+    elif local_fallback is not None:
+        _openai_provider.final_transcriber.local_fallback = local_fallback
+    return _openai_provider
 
 
 def _get_translation_queue() -> LocalLiveTranslationQueue:
@@ -371,7 +418,7 @@ async def shutdown_transcript_postprocess_queue() -> None:
 
 
 async def shutdown_processing_workers() -> None:
-    global _live_processing_worker, _persistence_service
+    global _live_processing_worker, _persistence_service, _openai_provider
     if _pcm_tasks:
         await asyncio.gather(*tuple(_pcm_tasks.values()), return_exceptions=True)
     worker, _live_processing_worker = _live_processing_worker, None
@@ -383,6 +430,15 @@ async def shutdown_processing_workers() -> None:
         _vad_registry.remove(session_id)
         _live_state_registry.remove(session_id)
     _segment_glossaries.clear()
+    openai_sessions = tuple(_openai_live_sessions.values())
+    _openai_live_sessions.clear()
+    if openai_sessions:
+        await asyncio.gather(
+            *(session.close() for session in openai_sessions), return_exceptions=True
+        )
+    _openai_pending_boundaries.clear()
+    _openai_item_boundaries.clear()
+    _openai_provider = None
     persistence, _persistence_service = _persistence_service, None
     if persistence is not None:
         await persistence.close()
@@ -408,6 +464,84 @@ async def _send_to_current_connection(session_id: str, payload: dict) -> None:
         await websocket.send_json(payload)
     except (RuntimeError, WebSocketDisconnect):
         return
+
+
+async def _handle_openai_live_event(session_id: str, event: ProviderLiveEvent) -> None:
+    boundary = _openai_item_boundaries.get((session_id, event.item_id))
+    if boundary is None:
+        pending = _openai_pending_boundaries.get(session_id, [])
+        if not pending:
+            return
+        boundary = pending.pop(0)
+        _openai_item_boundaries[(session_id, event.item_id)] = boundary
+    window, committed_at, glossary = boundary
+    current = _live_state_registry.latest(session_id, f"pcm-{window.start_sequence}-{window.end_sequence}")
+    if current is not None and current.state is TranscriptState.FINAL:
+        return
+    raw_text = event.text.strip()
+    correction = glossary.correct(raw_text, language=event.language) if glossary is not None and raw_text else None
+    update = LiveTranscriptUpdate(
+        session_id=session_id,
+        segment_id=f"pcm-{window.start_sequence}-{window.end_sequence}",
+        revision=1 if current is None else current.revision + 1,
+        state=TranscriptState(event.state),
+        sequence_start=window.start_sequence,
+        sequence_end=window.end_sequence,
+        start_ms=window.start_ms,
+        end_ms=window.end_ms,
+        text=correction.text if correction else raw_text,
+        raw_text=raw_text,
+        language=event.language,
+        model=event.model,
+        latency_ms=max(0.0, (monotonic() - committed_at) * 1000),
+        glossary_corrections=tuple(item.as_dict() for item in correction.corrections) if correction else (),
+        glossary_version=correction.glossary_version if correction else None,
+    )
+    outcome = _live_state_registry.apply(update, rollback_reason="openai_provider_revision")
+    if not outcome.accepted:
+        return
+    _persist("transcript", {
+        "sessionId": update.session_id, "segmentId": update.segment_id,
+        "revision": update.revision, "state": update.state.value,
+        "sourceType": "live", "rawText": update.raw_text,
+        "glossaryCorrectedText": update.text, "postProcessedText": None,
+        "language": update.language,
+        "modelMetadata": {
+            "provider": "openai", "model": update.model, "localCloud": "cloud",
+            "apiRequestId": event.request_id,
+        },
+        "glossaryVersion": update.glossary_version,
+        "corrections": list(update.glossary_corrections),
+        "latencyMs": update.latency_ms,
+        "sequenceStart": update.sequence_start, "sequenceEnd": update.sequence_end,
+        "startMs": update.start_ms, "endMs": update.end_ms,
+    })
+    await _send_to_current_connection(
+        session_id,
+        _event(
+            "transcript_state", update=update.as_dict(),
+            provider="openai", privacy="audio_sent_to_external_service",
+            metrics=_live_state_registry.metrics(session_id),
+        ),
+    )
+    if update.state is TranscriptState.STABLE and _runtime_settings.live_translation_enabled:
+        await _enqueue_live_translation(update, glossary)
+    if update.state is TranscriptState.FINAL:
+        _openai_item_boundaries.pop((session_id, event.item_id), None)
+        if _runtime_settings.live_translation_enabled and not _runtime_settings.live_accurate_final_enabled:
+            await _enqueue_live_translation(update, glossary)
+
+
+async def _ensure_openai_live_session(session_id: str) -> object:
+    existing = _openai_live_sessions.get(session_id)
+    if existing is not None:
+        return existing
+    provider = _get_openai_provider()
+    session = await provider.open_live_session(
+        lambda event: _handle_openai_live_event(session_id, event)
+    )
+    _openai_live_sessions[session_id] = session
+    return session
 
 
 async def _drain_pcm_transcription(session_id: str, *, flush: bool) -> None:
@@ -506,6 +640,36 @@ async def _transcribe_vad_segments(
             if _runtime_settings.live_glossary_enabled
             else None
         )
+        if _runtime_settings.live_transcription_provider == "openai":
+            try:
+                live_session = await _ensure_openai_live_session(session_id)
+                _openai_pending_boundaries.setdefault(session_id, []).append(
+                    (segment.window, monotonic(), glossary)
+                )
+                await live_session.commit()
+                persisted_segment_id = f"pcm-{segment.window.start_sequence}-{segment.window.end_sequence}"
+                _persist("segment", {
+                    "sessionId": session_id, "segmentId": persisted_segment_id,
+                    "sequenceStart": segment.window.start_sequence,
+                    "sequenceEnd": segment.window.end_sequence,
+                    "startMs": segment.window.start_ms, "endMs": segment.window.end_ms,
+                    "durationMs": segment.window.end_ms - segment.window.start_ms,
+                    "audioReference": f"runtime://{session_id}/{persisted_segment_id}",
+                    "audioSha256": hashlib.sha256(segment.window.audio).hexdigest(),
+                    "finalizedReason": segment.reason,
+                })
+                continue
+            except Exception as exc:
+                if not _runtime_settings.openai_allow_local_fallback:
+                    await _send_to_current_connection(
+                        session_id,
+                        _event("error", message=safe_error(exc), provider="openai", fallback=False),
+                    )
+                    return False
+                await _send_to_current_connection(
+                    session_id,
+                    _event("provider_fallback", provider="openai", fallbackProvider="local"),
+                )
         try:
             worker = _get_live_processing_worker()
             await worker.start()
@@ -1117,6 +1281,15 @@ async def _finish_pcm_session(session_id: str) -> None:
         _pcm_task_locks.pop(session_id, None)
     _pcm_registry.remove(session_id)
     _vad_registry.remove(session_id)
+    openai_session = _openai_live_sessions.pop(session_id, None)
+    if openai_session is not None:
+        try:
+            await openai_session.close()
+        except Exception:
+            pass
+    _openai_pending_boundaries.pop(session_id, None)
+    for key in [item for item in _openai_item_boundaries if item[0] == session_id]:
+        _openai_item_boundaries.pop(key, None)
     if _live_processing_worker is not None:
         await _live_processing_worker.cancel_session(session_id)
     if not _runtime_settings.live_accurate_final_enabled:
@@ -1151,6 +1324,15 @@ async def create_session(payload: CreateLiveSessionRequest, principal: Principal
         },
         "configuration": {
             "liveModel": session.model, "finalModel": _runtime_settings.live_final_model,
+            "providerSnapshot": {
+                "live": _runtime_settings.live_transcription_provider,
+                "accurateFinal": _runtime_settings.live_final_provider,
+                "externalAudio": "openai" in {
+                    _runtime_settings.live_transcription_provider,
+                    _runtime_settings.live_final_provider,
+                },
+                "consent": _runtime_settings.openai_external_audio_consent,
+            },
             "translationModel": _runtime_settings.live_translation_model,
             "diarizationModel": _runtime_settings.live_diarization_model,
         },
@@ -1454,6 +1636,16 @@ async def live_websocket(websocket: WebSocket, session_id: str) -> None:
                         )
                     )
                     if outcome.status != "backpressure":
+                        if _runtime_settings.live_transcription_provider == "openai":
+                            try:
+                                provider_session = await _ensure_openai_live_session(session_id)
+                                await provider_session.append_pcm16(audio, sample_rate=metadata.sample_rate)
+                            except Exception as exc:
+                                if not _runtime_settings.openai_allow_local_fallback:
+                                    await websocket.send_json(
+                                        _event("error", message=safe_error(exc), provider="openai", fallback=False)
+                                    )
+                                    continue
                         await _schedule_pcm_transcription(session_id)
                     continue
                 await websocket.send_json(_event("processing"))
@@ -1508,6 +1700,20 @@ async def live_websocket(websocket: WebSocket, session_id: str) -> None:
                         else _pcm_registry.metrics(session_id)
                     )
                     pcm_registered = True
+                    if _runtime_settings.live_transcription_provider == "openai":
+                        if not (_runtime_settings.live_vad_enabled and _runtime_settings.live_transcript_state_enabled):
+                            await websocket.send_json(
+                                _event("error", message="OpenAI live transcription requires PCM VAD and semantic transcript state")
+                            )
+                            continue
+                        try:
+                            await _ensure_openai_live_session(session_id)
+                        except Exception as exc:
+                            if not _runtime_settings.openai_allow_local_fallback:
+                                await websocket.send_json(
+                                    _event("error", message=safe_error(exc), provider="openai", fallback=False)
+                                )
+                                continue
                     await websocket.send_json(
                         _event(
                             "pcm_ready",
@@ -1518,6 +1724,12 @@ async def live_websocket(websocket: WebSocket, session_id: str) -> None:
                             chunkDurationMinMs=MIN_CHUNK_DURATION_MS,
                             chunkDurationMaxMs=MAX_CHUNK_DURATION_MS,
                             metrics=metrics,
+                            provider=_runtime_settings.live_transcription_provider,
+                            privacyWarning=(
+                                "Audio is sent to OpenAI for transcription."
+                                if _runtime_settings.live_transcription_provider == "openai"
+                                else None
+                            ),
                         )
                     )
                     if (

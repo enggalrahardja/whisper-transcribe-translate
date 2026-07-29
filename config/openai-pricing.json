@@ -1,0 +1,39 @@
+{
+  "schemaVersion": 1,
+  "currency": "USD",
+  "checkedDate": "2026-07-30",
+  "entries": [
+    {
+      "provider": "openai",
+      "model": "gpt-realtime-whisper",
+      "billingUnit": "audio_minute",
+      "inputPrice": 0.017,
+      "outputPrice": null,
+      "source": "https://developers.openai.com/api/docs/models/gpt-realtime-whisper"
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-4o-transcribe",
+      "billingUnit": "million_audio_tokens",
+      "inputPrice": 2.5,
+      "outputPrice": 10.0,
+      "source": "https://developers.openai.com/api/docs/models/gpt-4o-transcribe"
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-4o-mini-transcribe",
+      "billingUnit": "million_audio_tokens",
+      "inputPrice": 1.25,
+      "outputPrice": 5.0,
+      "source": "https://developers.openai.com/api/docs/models/gpt-4o-mini-transcribe"
+    },
+    {
+      "provider": "openai",
+      "model": "gpt-4o-transcribe-diarize",
+      "billingUnit": "million_audio_tokens",
+      "inputPrice": 2.5,
+      "outputPrice": 10.0,
+      "source": "https://developers.openai.com/api/docs/models/gpt-4o-transcribe-diarize"
+    }
+  ]
+}

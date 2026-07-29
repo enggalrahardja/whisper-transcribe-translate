@@ -37,6 +37,10 @@ class FinalTranscriptionTimeout(TimeoutError):
     pass
 
 
+class FinalTranscriptionPermanentError(RuntimeError):
+    """A request error that must not be retried (for example invalid credentials)."""
+
+
 @dataclass(frozen=True)
 class FinalTranscriptionConfig:
     model: str = "base"
@@ -103,6 +107,13 @@ class FinalModelMetadata:
     beam_size: int
     timestamps: tuple[dict[str, object], ...]
     latency_ms: float
+    provider: str = "whisper"
+    local_cloud: str = "local"
+    api_request_id: str | None = None
+    duration_seconds: float | None = None
+    usage: dict[str, object] | None = None
+    estimated_cost: dict[str, object] | None = None
+    retry_count: int = 0
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -115,6 +126,13 @@ class FinalModelMetadata:
             "beamSize": self.beam_size,
             "timestamps": list(self.timestamps),
             "latencyMs": round(self.latency_ms, 3),
+            "provider": self.provider,
+            "localCloud": self.local_cloud,
+            "apiRequestId": self.api_request_id,
+            "durationSeconds": self.duration_seconds,
+            "usage": self.usage,
+            "estimatedCost": self.estimated_cost,
+            "retryCount": self.retry_count,
         }
 
 
@@ -442,7 +460,9 @@ class LocalFinalTranscriptionQueue:
                 self._record_attempt(elapsed_ms)
                 if isinstance(exc, FinalTranscriptionTimeout):
                     self._metrics["timeout_count"] += 1
-                if attempt <= self.config.max_retries:
+                if attempt <= self.config.max_retries and not isinstance(
+                    exc, FinalTranscriptionPermanentError
+                ):
                     self._metrics["retries"] += 1
                     pending = replace(
                         processing,

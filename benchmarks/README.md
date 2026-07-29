@@ -97,3 +97,11 @@ Install `psutil` in the benchmark environment for child-process CPU/RAM
 sampling. NVIDIA GPU/VRAM sampling uses `nvidia-smi` when available. Missing
 samplers are reported as limitations. The runner writes `results.json`,
 `results.csv`, and `report.md` atomically to the selected output directory.
+
+## Optional OpenAI adapter
+
+`benchmarks/providers/openai_transcription.py` uses the same dataset/reference
+contract. It refuses to send audio unless `OPENAI_API_KEY`,
+`OPENAI_BILLING_APPROVED=true`, and `BENCHMARK_CLOUD_DATA_APPROVED=true` are all
+present. Dataset review is not treated as automatic cloud consent. Stage 17 did
+not run this paid adapter, so no OpenAI WER/CER or model ranking is claimed.

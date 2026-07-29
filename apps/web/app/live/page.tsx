@@ -457,6 +457,7 @@ export default function LivePage() {
   const [finalText, setFinalText] = useState("");
   const [segments, setSegments] = useState<LiveSession["segments"]>([]);
   const [error, setError] = useState("");
+  const [providerPrivacyWarning, setProviderPrivacyWarning] = useState("");
   const [pcmMetrics, setPcmMetrics] = useState<PcmTransportMetrics>(emptyPcmMetrics);
   const [vadMetrics, setVadMetrics] = useState<VadRuntimeMetrics | null>(null);
   const [liveTranscriptUpdates, setLiveTranscriptUpdates] = useState<Record<string, LiveTranscriptUpdate>>({});
@@ -637,6 +638,7 @@ export default function LivePage() {
         correctedTranslation?: string;
         appliedCorrections?: QualityCorrection[];
         fallback?: boolean;
+        privacyWarning?: string | null;
       };
       if (event.type === "processing") setConnection("processing");
       if (event.type === "persistence_degraded" || (event.metrics?.degraded_sessions ?? 0) > 0) setPersistenceDegraded(true);
@@ -645,6 +647,7 @@ export default function LivePage() {
       if (event.type === "partial") setConnection("connected");
       if (event.type === "pcm_ready" && event.expectedSequence !== undefined) {
         pcmTransportRef.current?.handleReady(event.expectedSequence, event.metrics);
+        setProviderPrivacyWarning(event.privacyWarning ?? "");
       }
       if (event.type === "ack" && event.sequence !== undefined && event.status) {
         pcmTransportRef.current?.handleAcknowledgement(event.sequence, event.status, event.metrics);
@@ -1250,6 +1253,11 @@ export default function LivePage() {
         </div>
         {!modelsLoading && availableModels.length === 0 ? <p className="error-callout" role="alert">No Whisper model is available. <Link href="/settings#whisper-models">Open Settings → Whisper Models</Link> to download one.</p> : null}
         {modelsError ? <p className="error-callout" role="alert">{modelsError} <Link href="/settings#whisper-models">Open model settings</Link>.</p> : null}
+        {providerPrivacyWarning ? (
+          <p className="error-callout" role="status">
+            External transcription provider: {providerPrivacyWarning} Do not continue without approved consent.
+          </p>
+        ) : null}
         <div className="live-status-grid">
           <div><span>Microphone</span><strong>{microphone}</strong></div>
           <div><span>Connection</span><strong>{connection}</strong></div>

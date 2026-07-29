@@ -227,6 +227,44 @@ type DiarizationMetrics = {
   queueDepth: number;
   renameCount: number;
 };
+type TranscriptPostprocessResult = {
+  jobId: string;
+  sessionId: string;
+  segmentId: string;
+  sourceRevision: number;
+  sourceKind: "final" | "accurate_final";
+  status: "pending" | "processing" | "completed" | "failed";
+  rawTranscript: string;
+  glossaryCorrectedTranscript: string;
+  postProcessedTranscript: string;
+  language: string;
+  model: string;
+  sequenceStart: number;
+  sequenceEnd: number;
+  startMs: number;
+  endMs: number;
+  glossaryVersion?: string | null;
+  attempt: number;
+  appliedCorrections: Array<{ rule: string; before: string; after: string }>;
+  latencyMs: number;
+  error?: string | null;
+  fallback: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+type TranscriptPostprocessMetrics = {
+  jobs: number;
+  completed: number;
+  failed: number;
+  retries: number;
+  corrections: number;
+  duplicatePhrases: number;
+  fillers: number;
+  protectedTokens: number;
+  processingLatencyMs: number;
+  fallback: number;
+  queueDepth: number;
+};
 
 const audioTransport: AudioTransport = process.env.NEXT_PUBLIC_LIVE_AUDIO_TRANSPORT === "pcm" ? "pcm" : "legacy";
 const liveTranscriptStateEnabled = process.env.NEXT_PUBLIC_LIVE_TRANSCRIPT_STATE_ENABLED === "true";
@@ -237,6 +275,8 @@ const liveTranslationQualityEnabled = process.env.NEXT_PUBLIC_LIVE_TRANSLATION_Q
 const usesTranslationQuality = usesLiveTranslation && liveTranslationQualityEnabled;
 const liveDiarizationEnabled = process.env.NEXT_PUBLIC_LIVE_DIARIZATION_ENABLED === "true";
 const usesLiveDiarization = usesLiveTranscriptState && liveDiarizationEnabled;
+const transcriptPostprocessEnabled = process.env.NEXT_PUBLIC_LIVE_TRANSCRIPT_POSTPROCESS_ENABLED === "true";
+const usesTranscriptPostprocess = usesLiveTranscriptState && transcriptPostprocessEnabled;
 const emptyPcmMetrics: PcmTransportMetrics = {
   chunksSent: 0,
   chunksAcknowledged: 0,
@@ -319,6 +359,19 @@ const emptyDiarizationMetrics: DiarizationMetrics = {
   processingLatencyMs: 0,
   queueDepth: 0,
   renameCount: 0,
+};
+const emptyTranscriptPostprocessMetrics: TranscriptPostprocessMetrics = {
+  jobs: 0,
+  completed: 0,
+  failed: 0,
+  retries: 0,
+  corrections: 0,
+  duplicatePhrases: 0,
+  fillers: 0,
+  protectedTokens: 0,
+  processingLatencyMs: 0,
+  fallback: 0,
+  queueDepth: 0,
 };
 
 const defaultLiveSettings = {
@@ -410,6 +463,8 @@ export default function LivePage() {
   const [translationQualityMetrics, setTranslationQualityMetrics] = useState<TranslationQualityMetrics>(emptyTranslationQualityMetrics);
   const [diarizationResults, setDiarizationResults] = useState<Record<string, DiarizationResult>>({});
   const [diarizationMetrics, setDiarizationMetrics] = useState<DiarizationMetrics>(emptyDiarizationMetrics);
+  const [transcriptPostprocess, setTranscriptPostprocess] = useState<Record<string, TranscriptPostprocessResult>>({});
+  const [transcriptPostprocessMetrics, setTranscriptPostprocessMetrics] = useState<TranscriptPostprocessMetrics>(emptyTranscriptPostprocessMetrics);
 
   const socketRef = useRef<WebSocket | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -565,6 +620,7 @@ export default function LivePage() {
         glossaryTermsApplied?: string[];
         qualityResults?: TranslationQuality[];
         assignments?: DiarizationResult[];
+        results?: TranscriptPostprocessResult[];
         assignment?: SpeakerAssignment | null;
         translationRevision?: number;
         rawModelTranslation?: string;
@@ -783,6 +839,44 @@ export default function LivePage() {
           renameCount: event.metrics.speaker_rename_count ?? 0,
         });
       }
+      if (event.type === "transcript_postprocess_snapshot" && event.results) {
+        setTranscriptPostprocess(Object.fromEntries(
+          event.results
+            .filter((item) => item.sessionId === sessionIdRef.current)
+            .map((item) => [item.segmentId, item]),
+        ));
+      }
+      if (
+        event.type === "transcript_postprocess_state"
+        && event.sessionId === sessionIdRef.current && event.segmentId
+        && event.jobId && event.sourceRevision !== undefined && event.status
+        && ["pending", "processing", "completed", "failed"].includes(event.status)
+      ) {
+        const update = event as unknown as TranscriptPostprocessResult;
+        setTranscriptPostprocess((currentItems) => {
+          const current = currentItems[update.segmentId];
+          if (current && update.sourceRevision < current.sourceRevision) return currentItems;
+          return { ...currentItems, [update.segmentId]: update };
+        });
+      }
+      if (
+        (event.type === "transcript_postprocess_state" || event.type === "transcript_postprocess_snapshot")
+        && event.metrics
+      ) {
+        setTranscriptPostprocessMetrics({
+          jobs: event.metrics.post_processing_jobs ?? 0,
+          completed: event.metrics.completed ?? 0,
+          failed: event.metrics.failed ?? 0,
+          retries: event.metrics.retries ?? 0,
+          corrections: event.metrics.correction_count ?? 0,
+          duplicatePhrases: event.metrics.duplicate_phrases_removed ?? 0,
+          fillers: event.metrics.filler_words_handled ?? 0,
+          protectedTokens: event.metrics.protected_tokens ?? 0,
+          processingLatencyMs: event.metrics.processing_latency_ms ?? 0,
+          fallback: event.metrics.fallback_count ?? 0,
+          queueDepth: event.metrics.queue_depth ?? 0,
+        });
+      }
       if (event.type === "error") {
         setError(event.message ?? "Live transcription failed");
         if (event.session?.status === "failed") setUiStatus("failed");
@@ -900,6 +994,8 @@ export default function LivePage() {
     setTranslationQualityMetrics(emptyTranslationQualityMetrics);
     setDiarizationResults({});
     setDiarizationMetrics(emptyDiarizationMetrics);
+    setTranscriptPostprocess({});
+    setTranscriptPostprocessMetrics(emptyTranscriptPostprocessMetrics);
 
     let created: LiveSession | null = null;
     try {
@@ -987,6 +1083,7 @@ export default function LivePage() {
     setTranslations({});
     setTranslationQuality({});
     setDiarizationResults({});
+    setTranscriptPostprocess({});
   }
 
   async function renameSpeaker(speakerId: string, currentLabel: string) {
@@ -1163,6 +1260,13 @@ export default function LivePage() {
           <div><span>Failures / retries / renames</span><strong>{diarizationMetrics.failures} / {diarizationMetrics.retries} / {diarizationMetrics.renameCount}</strong></div>
           <div><span>Processing latency</span><strong>{diarizationMetrics.processingLatencyMs.toFixed(0)}ms</strong></div>
         </div> : null}
+        {usesTranscriptPostprocess ? <div className="live-status-grid">
+          <div><span>Post-process jobs / queue</span><strong>{transcriptPostprocessMetrics.jobs} / {transcriptPostprocessMetrics.queueDepth}</strong></div>
+          <div><span>Completed / failed / retries</span><strong>{transcriptPostprocessMetrics.completed} / {transcriptPostprocessMetrics.failed} / {transcriptPostprocessMetrics.retries}</strong></div>
+          <div><span>Corrections / duplicates / fillers</span><strong>{transcriptPostprocessMetrics.corrections} / {transcriptPostprocessMetrics.duplicatePhrases} / {transcriptPostprocessMetrics.fillers}</strong></div>
+          <div><span>Protected / fallback</span><strong>{transcriptPostprocessMetrics.protectedTokens} / {transcriptPostprocessMetrics.fallback}</strong></div>
+          <div><span>Processing latency</span><strong>{transcriptPostprocessMetrics.processingLatencyMs.toFixed(3)}ms</strong></div>
+        </div> : null}
         <div className="live-controls">
           <button disabled={!canStart} onClick={start} type="button">Start</button>
           <button className="secondary" disabled={!(["active", "paused"] as UiStatus[]).includes(uiStatus)} onClick={pauseOrResume} type="button">{uiStatus === "paused" ? "Resume" : "Pause"}</button>
@@ -1190,6 +1294,8 @@ export default function LivePage() {
         const displayedTranslation = quality?.status === "completed" ? quality.correctedTranslation : quality?.rawTranslation ?? translation?.translatedText;
         return <article className="segment-row" key={segment.segmentId}><span>{(segment.startMs / 1000).toFixed(2)}s to {(segment.endMs / 1000).toFixed(2)}s · {segment.state} · r{segment.revision}{correction ? ` · accurate final: ${correction.status}` : ""}</span><p>{segment.text}</p>{diarization ? <div className="speaker-assignment"><small>Speaker diarization · {diarization.status}{diarization.assignment ? ` · confidence ${diarization.assignment.confidence.toFixed(3)}` : ""}</small>{diarization.assignment ? <p><strong>{diarization.assignment.speakerLabel}</strong> <button className="secondary" type="button" onClick={() => void renameSpeaker(diarization.assignment!.speakerId, diarization.assignment!.speakerLabel)}>Rename</button></p> : diarization.status === "failed" ? <small>{diarization.error ?? "Diarization failed"}; segment remains unassigned.</small> : null}</div> : null}{segment.rawText && segment.rawText !== segment.text ? <small>Raw model output: {segment.rawText}</small> : null}{segment.glossaryCorrections?.length ? <small>Glossary: {segment.glossaryCorrections.map((item) => `${item.source} → ${item.replacement}`).join(", ")}</small> : null}{correction?.status === "failed" ? <small>{correction.error ?? "Accurate final failed; live result retained."}</small> : null}{correction?.status === "completed" && correction.metadata ? <small>{correction.metadata.model} · {correction.metadata.device}/{correction.metadata.computeType} · beam {correction.metadata.beamSize}</small> : null}{translation ? <div className="translation-result"><small>Local translation · {translation.status} · r{translation.revision}{quality ? ` · quality: ${quality.status}` : ""}</small>{displayedTranslation ? <p>{displayedTranslation}</p> : null}{quality?.status === "completed" && quality.rawTranslation !== quality.correctedTranslation ? <small>Raw final translation: {quality.rawTranslation}</small> : null}{quality?.appliedCorrections?.length ? <small>Quality corrections: {quality.appliedCorrections.map((item) => item.rule).join(", ")}</small> : null}{quality?.fallback ? <small>{quality.error ?? "Quality pass failed"}; raw final translation retained.</small> : null}{translation.error ? <small>{translation.error}; source transcript retained.</small> : null}{translation.metadata ? <small>{translation.metadata.sourceLanguage}→{translation.metadata.targetLanguage} · {translation.metadata.model} · {translation.metadata.device}/{translation.metadata.computeType}</small> : null}</div> : null}</article>;
       })}</section> : null}
+
+      {usesTranscriptPostprocess && Object.keys(transcriptPostprocess).length > 0 ? <section className="live-segments"><h2>Final transcript post-processing</h2>{Object.values(transcriptPostprocess).sort((left, right) => left.sequenceStart - right.sequenceStart).map((result) => <article className="segment-row" key={result.segmentId}><span>{(result.startMs / 1000).toFixed(2)}s to {(result.endMs / 1000).toFixed(2)}s · {result.sourceKind} · {result.status} · source r{result.sourceRevision}</span><p>{result.postProcessedTranscript}</p><small>Raw transcript: {result.rawTranscript}</small><small>Glossary-corrected transcript: {result.glossaryCorrectedTranscript}</small>{result.appliedCorrections?.length ? <small>Post-processing corrections: {result.appliedCorrections.map((item) => item.rule).join(", ")}</small> : null}{result.fallback ? <small>{result.error ?? "Post-processing failed"}; glossary-corrected transcript retained.</small> : null}</article>)}</section> : null}
 
       {!usesLiveTranscriptState && segments.length > 0 ? <section className="live-segments"><h2>Segments</h2>{segments.map((segment, index) => <article className="segment-row" key={segment.id ?? `${segment.start}-${index}`}><span>{segment.start.toFixed(2)}s → {segment.end.toFixed(2)}s</span><p>{segment.text}</p></article>)}</section> : null}
     </section>

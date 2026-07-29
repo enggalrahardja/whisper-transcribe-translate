@@ -80,6 +80,14 @@ class Settings(BaseSettings):
     live_diarization_max_retries: int = 1
     live_diarization_worker_concurrency: int = 1
     live_diarization_queue_capacity: int = 64
+    live_transcript_postprocess_enabled: bool = False
+    live_transcript_postprocess_filler_mode: str = "preserve"
+    live_transcript_postprocess_filler_words: str = "uh,um,erm,hmm,eh,anu,eee,mmm"
+    live_transcript_postprocess_paragraph_sentences: int = 3
+    live_transcript_postprocess_timeout_seconds: float = 2.0
+    live_transcript_postprocess_max_retries: int = 1
+    live_transcript_postprocess_worker_concurrency: int = 1
+    live_transcript_postprocess_queue_capacity: int = 64
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

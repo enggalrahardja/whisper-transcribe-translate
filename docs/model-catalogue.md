@@ -34,6 +34,15 @@ text and applied corrections. The glossary does not change any model's
 accuracy classification or benchmark status, and is not a substitute for
 acoustic accuracy. It is disabled by default.
 
+## Local transcript post-processing layer
+
+| Component/version | Functionality | Accuracy classification | Streaming support | Translation support | Diarization | Hardware requirement | Privacy implication | Pricing | Benchmark status | Known limitations |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Stage 10 deterministic rules, repository revision | Post-process only final/accurate-final local transcripts with protected formatting, optional filler handling, repetition removal, and paragraph segmentation | Unclassified; syntax/constraint processing, not acoustic correction | Asynchronous completed-segment jobs; no partial processing | No | No | Negligible CPU/RAM; no GPU required | All transcript variants and glossary context remain local | local rule-based code — no per-request fee; infrastructure costs remain | Automated rule, protection, priority, queue, isolation, and fallback tests pass; internal quality review and microphone E2E pending | Cannot repair ASR meaning; conservative number/date rules; sentence-count paragraphs; configured filler ambiguity; process-local state |
+
+No additional model is introduced. See
+`docs/stage10-transcript-postprocessing.md` for rule order and safety behavior.
+
 ## Local final-translation quality layer
 
 | Component/version | Functionality | Accuracy classification | Streaming support | Translation support | Diarization | Hardware requirement | Privacy implication | Pricing | Benchmark status | Known limitations |

@@ -49,6 +49,14 @@ from ..services.speaker_diarization import (
     PersistentLocalSpeakerEmbedder,
     SpeakerDiarizationConfig,
 )
+from ..services.transcript_postprocessing import (
+    DeterministicTranscriptProcessor,
+    LocalTranscriptPostprocessQueue,
+    TranscriptPostprocessConfig,
+    TranscriptPostprocessRequest,
+    TranscriptPostprocessSnapshot,
+    TranscriptPostprocessStatus,
+)
 from ..services.live_sessions import (
     create_live_session,
     fail_live_session,
@@ -115,6 +123,7 @@ _glossary_manager: GlossaryManager | None = None
 _translation_queue: LocalLiveTranslationQueue | None = None
 _translation_quality_queue: LocalTranslationQualityQueue | None = None
 _diarization_queue: LocalSpeakerDiarizationQueue | None = None
+_transcript_postprocess_queue: LocalTranscriptPostprocessQueue | None = None
 _segment_glossaries: dict[
     tuple[str, str], GlossarySnapshot | DisabledGlossarySnapshot | None
 ] = {}
@@ -210,6 +219,28 @@ def _get_diarization_queue() -> LocalSpeakerDiarizationQueue:
     return _diarization_queue
 
 
+def _get_transcript_postprocess_queue() -> LocalTranscriptPostprocessQueue:
+    global _transcript_postprocess_queue
+    if _transcript_postprocess_queue is None:
+        config = TranscriptPostprocessConfig(
+            filler_mode=_runtime_settings.live_transcript_postprocess_filler_mode,
+            filler_words=tuple(
+                word.strip()
+                for word in _runtime_settings.live_transcript_postprocess_filler_words.split(",")
+                if word.strip()
+            ),
+            paragraph_sentences=_runtime_settings.live_transcript_postprocess_paragraph_sentences,
+            timeout_seconds=_runtime_settings.live_transcript_postprocess_timeout_seconds,
+            max_retries=_runtime_settings.live_transcript_postprocess_max_retries,
+            worker_concurrency=_runtime_settings.live_transcript_postprocess_worker_concurrency,
+            queue_capacity=_runtime_settings.live_transcript_postprocess_queue_capacity,
+        )
+        _transcript_postprocess_queue = LocalTranscriptPostprocessQueue(
+            config, DeterministicTranscriptProcessor(config)
+        )
+    return _transcript_postprocess_queue
+
+
 async def shutdown_final_transcription_queue() -> None:
     global _final_queue
     queue, _final_queue = _final_queue, None
@@ -234,6 +265,13 @@ async def shutdown_translation_quality_queue() -> None:
 async def shutdown_speaker_diarization_queue() -> None:
     global _diarization_queue
     queue, _diarization_queue = _diarization_queue, None
+    if queue is not None:
+        await queue.close()
+
+
+async def shutdown_transcript_postprocess_queue() -> None:
+    global _transcript_postprocess_queue
+    queue, _transcript_postprocess_queue = _transcript_postprocess_queue, None
     if queue is not None:
         await queue.close()
 
@@ -400,7 +438,10 @@ async def _transcribe_vad_segments(
         if detailed is not None and not detailed.duplicate:
             if (
                 _runtime_settings.live_accurate_final_enabled
-                and _runtime_settings.live_translation_enabled
+                and (
+                    _runtime_settings.live_translation_enabled
+                    or _runtime_settings.live_transcript_postprocess_enabled
+                )
             ):
                 _segment_glossaries[(session_id, detailed.segment_id)] = glossary
             await _send_live_transcript_lifecycle(session_id, detailed, glossary)
@@ -512,10 +553,80 @@ async def _send_live_transcript_lifecycle(
             ),
         )
         if (
+            _runtime_settings.live_transcript_postprocess_enabled
+            and state is TranscriptState.FINAL
+        ):
+            await _enqueue_transcript_postprocess(update, glossary, "final")
+        if (
             _runtime_settings.live_translation_enabled
             and state in {TranscriptState.STABLE, TranscriptState.FINAL}
         ):
             await _enqueue_live_translation(update, glossary)
+
+
+async def _enqueue_transcript_postprocess(
+    update: LiveTranscriptUpdate,
+    glossary: GlossarySnapshot | DisabledGlossarySnapshot | None,
+    source_kind: str,
+) -> None:
+    queue = _get_transcript_postprocess_queue()
+    request = TranscriptPostprocessRequest(
+        session_id=update.session_id,
+        segment_id=update.segment_id,
+        source_revision=update.revision,
+        source_kind=source_kind,
+        raw_transcript=update.raw_text or update.text,
+        glossary_corrected_transcript=update.text,
+        language=update.language,
+        model=update.model,
+        sequence_start=update.sequence_start,
+        sequence_end=update.sequence_end,
+        start_ms=update.start_ms,
+        end_ms=update.end_ms,
+        glossary_version=update.glossary_version,
+        glossary=glossary,
+    )
+    try:
+        outcome = await queue.enqueue(request, _handle_transcript_postprocess_status)
+    except (asyncio.QueueFull, ValueError) as exc:
+        await _send_to_current_connection(
+            update.session_id,
+            _event(
+                "transcript_postprocess_state",
+                jobId=request.job_id, sessionId=request.session_id,
+                segmentId=request.segment_id, sourceRevision=request.source_revision,
+                sourceKind=request.source_kind,
+                status=TranscriptPostprocessStatus.FAILED.value,
+                rawTranscript=request.raw_transcript,
+                glossaryCorrectedTranscript=request.glossary_corrected_transcript,
+                postProcessedTranscript=request.glossary_corrected_transcript,
+                language=request.language, model=request.model,
+                sequenceStart=request.sequence_start, sequenceEnd=request.sequence_end,
+                startMs=request.start_ms, endMs=request.end_ms,
+                glossaryVersion=request.glossary_version,
+                fallback=True, error=str(exc), metrics=queue.metrics(),
+            ),
+        )
+        return
+    if not outcome.accepted:
+        await _send_to_current_connection(
+            update.session_id,
+            _event(
+                "transcript_postprocess_state",
+                **outcome.snapshot.as_dict(), rejectedReason=outcome.reason,
+                metrics=queue.metrics(),
+            ),
+        )
+
+
+async def _handle_transcript_postprocess_status(
+    snapshot: TranscriptPostprocessSnapshot,
+) -> None:
+    queue = _get_transcript_postprocess_queue()
+    await _send_to_current_connection(
+        snapshot.session_id,
+        _event("transcript_postprocess_state", **snapshot.as_dict(), metrics=queue.metrics()),
+    )
 
 
 async def _enqueue_live_translation(
@@ -747,6 +858,12 @@ async def _handle_final_job_status(snapshot: FinalJobSnapshot) -> None:
             if outcome.accepted:
                 queue.record_replacement()
                 payload["update"] = corrected.as_dict()
+                if _runtime_settings.live_transcript_postprocess_enabled:
+                    await _enqueue_transcript_postprocess(
+                        corrected,
+                        _segment_glossaries.get((corrected.session_id, corrected.segment_id)),
+                        "accurate_final",
+                    )
                 if _runtime_settings.live_translation_enabled:
                     await _enqueue_live_translation(
                         corrected,
@@ -1070,6 +1187,20 @@ async def live_websocket(websocket: WebSocket, session_id: str) -> None:
                                     for item in _diarization_queue.snapshot(session_id)
                                 ],
                                 metrics=_diarization_queue.metrics(),
+                            )
+                        )
+                    if (
+                        _runtime_settings.live_transcript_postprocess_enabled
+                        and _transcript_postprocess_queue is not None
+                    ):
+                        await websocket.send_json(
+                            _event(
+                                "transcript_postprocess_snapshot",
+                                results=[
+                                    item.as_dict()
+                                    for item in _transcript_postprocess_queue.snapshot(session_id)
+                                ],
+                                metrics=_transcript_postprocess_queue.metrics(),
                             )
                         )
                 elif command_type == "pcm_chunk":

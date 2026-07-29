@@ -261,3 +261,22 @@ bounded. Failure leaves the segment unassigned and never mutates transcript,
 translation, or timestamps. Both feature flags default off; no production
 schema, legacy behavior, Whisper `base` default, provider, or cloud integration
 changed. See `docs/stage9-local-speaker-diarization.md`.
+
+## Stage 10 addendum
+
+Stage 10 adds a separate runtime-only post-processing consumer for semantic
+final transcript revisions. Live final can enqueue first; an accepted
+accurate-final replacement has a higher revision and supersedes it for the same
+segment. Partial/stable states and the legacy recorder do not enter this branch.
+
+The bounded local rule queue retains raw model, glossary-corrected, and
+post-processed text separately. It normalizes conservative formatting,
+optionally handles configured filler words, segments paragraphs, protects
+technical/invariant tokens, and validates safety postconditions. Failure falls
+back to the glossary-corrected transcript without mutating transcript state,
+translation, diarization, or timestamps. Reconnect snapshots return the latest
+process-local result.
+
+Both flags default off. No production schema, Whisper model/default, provider,
+LLM, or cloud integration changed. See
+`docs/stage10-transcript-postprocessing.md`.

@@ -12,7 +12,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import monotonic
 
-import fcntl
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 from pymongo import ReturnDocument
 
@@ -191,10 +194,20 @@ class WhisperModelDownloader:
         descriptor = os.open(lock_path, flags, 0o600)
         try:
             os.chmod(lock_path, 0o600)
-            fcntl.flock(descriptor, fcntl.LOCK_EX)
+            if os.name == "nt":
+                if os.fstat(descriptor).st_size == 0:
+                    os.write(descriptor, b"\0")
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                msvcrt.locking(descriptor, msvcrt.LK_LOCK, 1)
+            else:
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
             yield
         finally:
-            fcntl.flock(descriptor, fcntl.LOCK_UN)
+            if os.name == "nt":
+                os.lseek(descriptor, 0, os.SEEK_SET)
+                msvcrt.locking(descriptor, msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
             os.close(descriptor)
 
     def _response_total(self, response: object, offset: int) -> int | None:

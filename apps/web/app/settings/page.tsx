@@ -23,6 +23,21 @@ import { applyThemePreference } from "../components/runtime-preferences";
 
 type Feedback = { type: "success" | "error"; message: string } | null;
 type SettingsSection = "general" | "transcription" | "translation" | "live_transcription" | "storage_retention" | "worker_processing";
+type SettingsTab = SettingsSection | "whisper-models";
+
+const settingsTabs: ReadonlyArray<{ id: SettingsTab; label: string }> = [
+  { id: "general", label: "General" },
+  { id: "whisper-models", label: "Whisper Models" },
+  { id: "transcription", label: "Transcription" },
+  { id: "translation", label: "Translation" },
+  { id: "live_transcription", label: "Live" },
+  { id: "storage_retention", label: "Storage" },
+  { id: "worker_processing", label: "Worker" },
+];
+
+function isSettingsTab(value: string): value is SettingsTab {
+  return settingsTabs.some((tab) => tab.id === value);
+}
 
 const modelStatusLabels: Record<WhisperModelStatus, string> = {
   not_downloaded: "Not downloaded",
@@ -53,6 +68,7 @@ function dateTime(value: string | null): string {
 }
 
 export default function SettingsPage() {
+  const [activeTab, setActiveTab] = useState<SettingsTab>("general");
   const [saved, setSaved] = useState<ApplicationSettings | null>(null);
   const [draft, setDraft] = useState<ApplicationSettings | null>(null);
   const [runtime, setRuntime] = useState<SettingsRuntime | null>(null);
@@ -133,6 +149,35 @@ export default function SettingsPage() {
       mounted.current = false;
     };
   }, []);
+
+  useEffect(() => {
+    const syncTabWithHash = () => {
+      const hash = window.location.hash.slice(1);
+      if (isSettingsTab(hash)) setActiveTab(hash);
+    };
+    syncTabWithHash();
+    window.addEventListener("hashchange", syncTabWithHash);
+    return () => window.removeEventListener("hashchange", syncTabWithHash);
+  }, []);
+
+  function selectTab(tab: SettingsTab) {
+    setActiveTab(tab);
+    window.history.replaceState(null, "", `#${tab}`);
+  }
+
+  function handleTabKeyDown(event: React.KeyboardEvent<HTMLButtonElement>, tab: SettingsTab) {
+    const currentIndex = settingsTabs.findIndex((item) => item.id === tab);
+    let nextIndex: number | null = null;
+    if (event.key === "ArrowRight") nextIndex = (currentIndex + 1) % settingsTabs.length;
+    if (event.key === "ArrowLeft") nextIndex = (currentIndex - 1 + settingsTabs.length) % settingsTabs.length;
+    if (event.key === "Home") nextIndex = 0;
+    if (event.key === "End") nextIndex = settingsTabs.length - 1;
+    if (nextIndex === null) return;
+    event.preventDefault();
+    const nextTab = settingsTabs[nextIndex].id;
+    selectTab(nextTab);
+    document.getElementById(`settings-tab-${nextTab}`)?.focus();
+  }
 
   function update(section: SettingsSection, field: string, value: string | number | boolean | string[]) {
     setDraft((current) => current ? ({
@@ -363,8 +408,27 @@ export default function SettingsPage() {
       </div>
       {feedback ? <p className={`settings-feedback ${feedback.type}`} role="status">{feedback.message}</p> : null}
 
+      <div aria-label="Settings sections" className="settings-tabs" role="tablist">
+        {settingsTabs.map((tab) => (
+          <button
+            aria-controls={`settings-panel-${tab.id}`}
+            aria-selected={activeTab === tab.id}
+            className={activeTab === tab.id ? "active" : ""}
+            id={`settings-tab-${tab.id}`}
+            key={tab.id}
+            onClick={() => selectTab(tab.id)}
+            onKeyDown={(event) => handleTabKeyDown(event, tab.id)}
+            role="tab"
+            tabIndex={activeTab === tab.id ? 0 : -1}
+            type="button"
+          >
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
       <div className="settings-sections">
-        <section className="settings-card">
+        <section aria-labelledby="settings-tab-general" className="settings-card" hidden={activeTab !== "general"} id="settings-panel-general" role="tabpanel">
           <div className="settings-section-heading"><div><p className="eyebrow">GENERAL</p><h2>Workspace defaults</h2></div></div>
           <div className="settings-grid">
             <label>Default language<select disabled={disabled} value={draft.general.default_language} onChange={(event) => update("general", "default_language", event.target.value)}>{sourceLanguages.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
@@ -375,7 +439,7 @@ export default function SettingsPage() {
           </div>
         </section>
 
-        <section className="settings-card whisper-models-section" id="whisper-models">
+        <section aria-labelledby="settings-tab-whisper-models" className="settings-card whisper-models-section" hidden={activeTab !== "whisper-models"} id="settings-panel-whisper-models" role="tabpanel">
           <div className="settings-section-heading">
             <div><p className="eyebrow">LOCAL MODEL REGISTRY</p><h2>Whisper Models</h2><p className="section-description">Download, scan, verify, or remove local checkpoints managed in this storage directory.</p></div>
             <button className="model-scan-button" disabled={modelActionsDisabled || hasActiveModelOperation} onClick={scanModels} type="button">{modelAction === "scan" ? "Scanning…" : "Scan Models"}</button>
@@ -415,7 +479,7 @@ export default function SettingsPage() {
           )}
         </section>
 
-        <section className="settings-card">
+        <section aria-labelledby="settings-tab-transcription" className="settings-card" hidden={activeTab !== "transcription"} id="settings-panel-transcription" role="tabpanel">
           <div className="settings-section-heading"><div><p className="eyebrow">TRANSCRIPTION</p><h2>Whisper decoding</h2></div></div>
           <div className="settings-grid">
             <label>Device <span className="restart-badge">Restart required</span><select disabled={disabled} value={draft.transcription.device} onChange={(event) => update("transcription", "device", event.target.value)}><option value="auto">Auto</option><option value="cpu">CPU</option><option value="cuda">CUDA</option></select></label>
@@ -428,7 +492,7 @@ export default function SettingsPage() {
           </div>
         </section>
 
-        <section className="settings-card">
+        <section aria-labelledby="settings-tab-translation" className="settings-card" hidden={activeTab !== "translation"} id="settings-panel-translation" role="tabpanel">
           <div className="settings-section-heading"><div><p className="eyebrow">TRANSLATION</p><h2>Provider behavior</h2></div><span className="safe-note">Provider secrets are environment-only and never returned.</span></div>
           <div className="settings-grid">
             <label>Default target language<select disabled={disabled} value={draft.translation.default_target_language} onChange={(event) => update("translation", "default_target_language", event.target.value)}>{targetLanguages.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
@@ -439,7 +503,7 @@ export default function SettingsPage() {
           </div>
         </section>
 
-        <section className="settings-card">
+        <section aria-labelledby="settings-tab-live_transcription" className="settings-card" hidden={activeTab !== "live_transcription"} id="settings-panel-live_transcription" role="tabpanel">
           <div className="settings-section-heading"><div><p className="eyebrow">LIVE TRANSCRIPTION</p><h2>Browser session defaults</h2></div></div>
           <div className="settings-grid">
             <label>Chunk duration (seconds)<input disabled={disabled} min="2" max="5" step="0.25" type="number" value={draft.live_transcription.chunk_duration_seconds} onChange={(event) => update("live_transcription", "chunk_duration_seconds", Number(event.target.value))} /></label>
@@ -451,7 +515,7 @@ export default function SettingsPage() {
           </div>
         </section>
 
-        <section className="settings-card">
+        <section aria-labelledby="settings-tab-storage_retention" className="settings-card" hidden={activeTab !== "storage_retention"} id="settings-panel-storage_retention" role="tabpanel">
           <div className="settings-section-heading"><div><p className="eyebrow">STORAGE &amp; RETENTION</p><h2>Local files</h2></div><button className="cleanup-button" disabled={disabled} onClick={cleanup} type="button">{cleaning ? "Cleaning…" : "Run cleanup now"}</button></div>
           <div className="storage-summary">
             <div><span>Total usage</span><strong>{formatBytes(runtime?.storage_usage.total_bytes)}</strong></div><div><span>Uploads</span><strong>{formatBytes(runtime?.storage_usage.uploads_bytes)}</strong></div><div><span>Exports</span><strong>{formatBytes(runtime?.storage_usage.exports_bytes)}</strong></div><div><span>Files</span><strong>{runtime?.storage_usage.file_count ?? "—"}</strong></div>
@@ -466,7 +530,7 @@ export default function SettingsPage() {
           {cleanupResult ? <dl className="cleanup-summary"><div><dt>Media removed</dt><dd>{cleanupResult.media_files_deleted}</dd></div><div><dt>Exports removed</dt><dd>{cleanupResult.export_files_deleted}</dd></div><div><dt>Orphans removed</dt><dd>{cleanupResult.orphan_files_deleted}</dd></div><div><dt>Active protected</dt><dd>{cleanupResult.protected_active_files}</dd></div><div><dt>Projects protected</dt><dd>{cleanupResult.protected_project_files}</dd></div></dl> : null}
         </section>
 
-        <section className="settings-card">
+        <section aria-labelledby="settings-tab-worker_processing" className="settings-card" hidden={activeTab !== "worker_processing"} id="settings-panel-worker_processing" role="tabpanel">
           <div className="settings-section-heading"><div><p className="eyebrow">WORKER &amp; PROCESSING</p><h2>Runtime status</h2></div><span className={`runtime-status runtime-${runtime?.worker_status ?? "offline"}`}>{runtime?.worker_status ?? "offline"}</span></div>
           <dl className="runtime-grid">
             <div><dt>Worker ID</dt><dd>{runtime?.worker_id ?? "—"}</dd></div><div><dt>Last heartbeat</dt><dd>{dateTime(runtime?.last_heartbeat ?? null)}</dd></div><div><dt>Current job</dt><dd>{runtime?.current_job ?? "Idle"}</dd></div><div><dt>Active workers</dt><dd>{runtime?.active_workers ?? 0}</dd></div><div><dt>Effective device</dt><dd>{runtime?.effective_device ?? "—"}</dd></div><div><dt>Configured concurrency</dt><dd>{runtime?.configured_concurrency ?? draft.transcription.maximum_concurrent_transcription_jobs}</dd></div>

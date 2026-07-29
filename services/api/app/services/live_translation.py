@@ -79,6 +79,8 @@ class TranslationRequest:
     context_segment_ids: tuple[str, ...] = ()
     context_texts: tuple[str, ...] = ()
     glossary: GlossaryType = field(default=None, compare=False, repr=False)
+    start_ms: float | None = None
+    end_ms: float | None = None
 
     @property
     def job_id(self) -> str:
@@ -97,6 +99,13 @@ class TranslationRequest:
             raise ValueError("Only stable/final transcripts can be translated")
         if len(self.context_segment_ids) != len(self.context_texts):
             raise ValueError("Translation context IDs/texts must align")
+        if self.start_ms is not None and self.start_ms < 0:
+            raise ValueError("Translation start timestamp cannot be negative")
+        if self.end_ms is not None and (
+            self.end_ms < 0
+            or (self.start_ms is not None and self.end_ms < self.start_ms)
+        ):
+            raise ValueError("Translation timestamp range is invalid")
 
 
 @dataclass(frozen=True)
@@ -117,6 +126,8 @@ class TranslationMetadata:
     detection_confidence: float | None
     created_at: datetime
     updated_at: datetime
+    start_ms: float | None = None
+    end_ms: float | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -136,6 +147,8 @@ class TranslationMetadata:
             "languageDetectionConfidence": self.detection_confidence,
             "createdAt": self.created_at.isoformat(),
             "updatedAt": self.updated_at.isoformat(),
+            "startMs": self.start_ms,
+            "endMs": self.end_ms,
         }
 
 
@@ -162,6 +175,7 @@ class TranslationSnapshot:
     error: str | None = None
     created_at: datetime = field(default_factory=utc_now)
     updated_at: datetime = field(default_factory=utc_now)
+    glossary: GlossaryType = field(default=None, compare=False, repr=False)
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -303,6 +317,8 @@ class PersistentLocalMarianTranslator:
                 detection_confidence=confidence,
                 created_at=finished,
                 updated_at=finished,
+                start_ms=request.start_ms,
+                end_ms=request.end_ms,
             ),
         )
 
@@ -442,6 +458,7 @@ class LocalLiveTranslationQueue:
             translation_revision=(self._latest.get(key).translation_revision + 1 if key in self._latest else 1),
             created_at=now,
             updated_at=now,
+            glossary=request.glossary,
         )
         self._latest_source_revision[key] = request.source_revision
         self._latest[key] = snapshot

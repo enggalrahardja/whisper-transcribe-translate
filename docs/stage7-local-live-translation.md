@@ -91,6 +91,8 @@ Metadata includes provider, model/checkpoint, local/cloud, configured/detected
 source language, target language, context segment IDs, glossary version,
 device, compute type, latency, source revision, detection confidence, and
 created/updated timestamps.
+Audio `startMs` and `endMs` are carried unchanged from the source transcript so
+downstream local quality processing cannot shift segment timing.
 
 ## Context and terminology
 

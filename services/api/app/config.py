@@ -64,6 +64,11 @@ class Settings(BaseSettings):
     live_translation_worker_concurrency: int = 1
     live_translation_queue_capacity: int = 64
     live_translation_context_segments: int = 3
+    live_translation_quality_enabled: bool = False
+    live_translation_quality_timeout_seconds: float = 2.0
+    live_translation_quality_max_retries: int = 1
+    live_translation_quality_worker_concurrency: int = 1
+    live_translation_quality_queue_capacity: int = 64
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

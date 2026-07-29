@@ -147,12 +147,49 @@ type TranslationMetrics = {
   replacementCount: number;
   detectionConfidence: number;
 };
+type QualityCorrection = { rule: string; before: string; after: string };
+type TranslationQuality = {
+  jobId: string;
+  sessionId: string;
+  segmentId: string;
+  translationRevision: number;
+  status: "pending" | "processing" | "completed" | "failed";
+  sourceText: string;
+  rawModelTranslation: string;
+  rawTranslation: string;
+  correctedTranslation: string;
+  sourceLanguage: string;
+  targetLanguage: string;
+  glossaryVersion?: string | null;
+  startMs?: number | null;
+  endMs?: number | null;
+  attempt: number;
+  appliedCorrections: QualityCorrection[];
+  latencyMs: number;
+  error?: string | null;
+  fallback: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+type TranslationQualityMetrics = {
+  processedJobs: number;
+  correctionsApplied: number;
+  failedJobs: number;
+  correctionLatencyMs: number;
+  fallbackCount: number;
+  terminologyCorrections: number;
+  protectionCount: number;
+  retries: number;
+  queueDepth: number;
+};
 
 const audioTransport: AudioTransport = process.env.NEXT_PUBLIC_LIVE_AUDIO_TRANSPORT === "pcm" ? "pcm" : "legacy";
 const liveTranscriptStateEnabled = process.env.NEXT_PUBLIC_LIVE_TRANSCRIPT_STATE_ENABLED === "true";
 const usesLiveTranscriptState = audioTransport === "pcm" && liveTranscriptStateEnabled;
 const liveTranslationEnabled = process.env.NEXT_PUBLIC_LIVE_TRANSLATION_ENABLED === "true";
 const usesLiveTranslation = usesLiveTranscriptState && liveTranslationEnabled;
+const liveTranslationQualityEnabled = process.env.NEXT_PUBLIC_LIVE_TRANSLATION_QUALITY_ENABLED === "true";
+const usesTranslationQuality = usesLiveTranslation && liveTranslationQualityEnabled;
 const emptyPcmMetrics: PcmTransportMetrics = {
   chunksSent: 0,
   chunksAcknowledged: 0,
@@ -212,6 +249,17 @@ const emptyTranslationMetrics: TranslationMetrics = {
   termsApplied: 0,
   replacementCount: 0,
   detectionConfidence: 0,
+};
+const emptyTranslationQualityMetrics: TranslationQualityMetrics = {
+  processedJobs: 0,
+  correctionsApplied: 0,
+  failedJobs: 0,
+  correctionLatencyMs: 0,
+  fallbackCount: 0,
+  terminologyCorrections: 0,
+  protectionCount: 0,
+  retries: 0,
+  queueDepth: 0,
 };
 
 const defaultLiveSettings = {
@@ -299,6 +347,8 @@ export default function LivePage() {
   const [glossaryMetrics, setGlossaryMetrics] = useState<GlossaryMetrics | null>(null);
   const [translations, setTranslations] = useState<Record<string, LiveTranslation>>({});
   const [translationMetrics, setTranslationMetrics] = useState<TranslationMetrics>(emptyTranslationMetrics);
+  const [translationQuality, setTranslationQuality] = useState<Record<string, TranslationQuality>>({});
+  const [translationQualityMetrics, setTranslationQualityMetrics] = useState<TranslationQualityMetrics>(emptyTranslationQualityMetrics);
 
   const socketRef = useRef<WebSocket | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -452,6 +502,13 @@ export default function LivePage() {
         translatedText?: string | null;
         rawTranslatedText?: string | null;
         glossaryTermsApplied?: string[];
+        qualityResults?: TranslationQuality[];
+        translationRevision?: number;
+        rawModelTranslation?: string;
+        rawTranslation?: string;
+        correctedTranslation?: string;
+        appliedCorrections?: QualityCorrection[];
+        fallback?: boolean;
       };
       if (event.type === "processing") setConnection("processing");
       if (event.type === "connected") setConnection("connected");
@@ -589,6 +646,48 @@ export default function LivePage() {
           detectionConfidence: event.metrics.language_detection_confidence ?? 0,
         });
       }
+      if (event.type === "translation_quality_snapshot" && event.qualityResults) {
+        setTranslationQuality(Object.fromEntries(
+          event.qualityResults
+            .filter((item) => item.sessionId === sessionIdRef.current)
+            .map((item) => [item.segmentId, item]),
+        ));
+      }
+      if (
+        event.type === "translation_quality_state"
+        && event.sessionId === sessionIdRef.current && event.segmentId
+        && event.jobId && event.translationRevision !== undefined
+        && event.status && ["pending", "processing", "completed", "failed"].includes(event.status)
+      ) {
+        const update = event as unknown as TranslationQuality;
+        setTranslationQuality((currentItems) => {
+          const current = currentItems[update.segmentId];
+          if (current && (
+            update.translationRevision < current.translationRevision
+            || (
+              update.translationRevision === current.translationRevision
+              && update.jobId !== current.jobId
+            )
+          )) return currentItems;
+          return { ...currentItems, [update.segmentId]: update };
+        });
+      }
+      if (
+        (event.type === "translation_quality_state" || event.type === "translation_quality_snapshot")
+        && event.metrics
+      ) {
+        setTranslationQualityMetrics({
+          processedJobs: event.metrics.processed_quality_jobs ?? 0,
+          correctionsApplied: event.metrics.corrections_applied ?? 0,
+          failedJobs: event.metrics.failed_jobs ?? 0,
+          correctionLatencyMs: event.metrics.correction_latency_ms ?? 0,
+          fallbackCount: event.metrics.fallback_count ?? 0,
+          terminologyCorrections: event.metrics.terminology_corrections ?? 0,
+          protectionCount: event.metrics.number_date_protection_count ?? 0,
+          retries: event.metrics.retries ?? 0,
+          queueDepth: event.metrics.queue_depth ?? 0,
+        });
+      }
       if (event.type === "error") {
         setError(event.message ?? "Live transcription failed");
         if (event.session?.status === "failed") setUiStatus("failed");
@@ -702,6 +801,8 @@ export default function LivePage() {
     setGlossaryMetrics(null);
     setTranslations({});
     setTranslationMetrics(emptyTranslationMetrics);
+    setTranslationQuality({});
+    setTranslationQualityMetrics(emptyTranslationQualityMetrics);
 
     let created: LiveSession | null = null;
     try {
@@ -787,6 +888,7 @@ export default function LivePage() {
     setLiveTranscriptUpdates({});
     setFinalCorrections({});
     setTranslations({});
+    setTranslationQuality({});
   }
 
   useEffect(() => {
@@ -923,6 +1025,13 @@ export default function LivePage() {
           <div><span>Terms / replacements</span><strong>{translationMetrics.termsApplied} / {translationMetrics.replacementCount}</strong></div>
           <div><span>Detection confidence</span><strong>{translationMetrics.detectionConfidence.toFixed(3)}</strong></div>
         </div> : null}
+        {usesTranslationQuality ? <div className="live-status-grid">
+          <div><span>Quality jobs / queue</span><strong>{translationQualityMetrics.processedJobs} / {translationQualityMetrics.queueDepth}</strong></div>
+          <div><span>Corrections / terminology</span><strong>{translationQualityMetrics.correctionsApplied} / {translationQualityMetrics.terminologyCorrections}</strong></div>
+          <div><span>Failed / fallback / retries</span><strong>{translationQualityMetrics.failedJobs} / {translationQualityMetrics.fallbackCount} / {translationQualityMetrics.retries}</strong></div>
+          <div><span>Protected values</span><strong>{translationQualityMetrics.protectionCount}</strong></div>
+          <div><span>Correction latency</span><strong>{translationQualityMetrics.correctionLatencyMs.toFixed(3)}ms</strong></div>
+        </div> : null}
         <div className="live-controls">
           <button disabled={!canStart} onClick={start} type="button">Start</button>
           <button className="secondary" disabled={!(["active", "paused"] as UiStatus[]).includes(uiStatus)} onClick={pauseOrResume} type="button">{uiStatus === "paused" ? "Resume" : "Pause"}</button>
@@ -945,7 +1054,9 @@ export default function LivePage() {
       {usesLiveTranscriptState && semanticSegments.length > 0 ? <section className="live-segments"><h2>Semantic segments</h2>{semanticSegments.map((segment) => {
         const correction = finalCorrections[segment.segmentId];
         const translation = translations[segment.segmentId];
-        return <article className="segment-row" key={segment.segmentId}><span>{(segment.startMs / 1000).toFixed(2)}s to {(segment.endMs / 1000).toFixed(2)}s · {segment.state} · r{segment.revision}{correction ? ` · accurate final: ${correction.status}` : ""}</span><p>{segment.text}</p>{segment.rawText && segment.rawText !== segment.text ? <small>Raw model output: {segment.rawText}</small> : null}{segment.glossaryCorrections?.length ? <small>Glossary: {segment.glossaryCorrections.map((item) => `${item.source} → ${item.replacement}`).join(", ")}</small> : null}{correction?.status === "failed" ? <small>{correction.error ?? "Accurate final failed; live result retained."}</small> : null}{correction?.status === "completed" && correction.metadata ? <small>{correction.metadata.model} · {correction.metadata.device}/{correction.metadata.computeType} · beam {correction.metadata.beamSize}</small> : null}{translation ? <div className="translation-result"><small>Local translation · {translation.status} · r{translation.revision}</small>{translation.translatedText ? <p>{translation.translatedText}</p> : null}{translation.error ? <small>{translation.error}; source transcript retained.</small> : null}{translation.metadata ? <small>{translation.metadata.sourceLanguage}→{translation.metadata.targetLanguage} · {translation.metadata.model} · {translation.metadata.device}/{translation.metadata.computeType}</small> : null}</div> : null}</article>;
+        const quality = translationQuality[segment.segmentId];
+        const displayedTranslation = quality?.status === "completed" ? quality.correctedTranslation : quality?.rawTranslation ?? translation?.translatedText;
+        return <article className="segment-row" key={segment.segmentId}><span>{(segment.startMs / 1000).toFixed(2)}s to {(segment.endMs / 1000).toFixed(2)}s · {segment.state} · r{segment.revision}{correction ? ` · accurate final: ${correction.status}` : ""}</span><p>{segment.text}</p>{segment.rawText && segment.rawText !== segment.text ? <small>Raw model output: {segment.rawText}</small> : null}{segment.glossaryCorrections?.length ? <small>Glossary: {segment.glossaryCorrections.map((item) => `${item.source} → ${item.replacement}`).join(", ")}</small> : null}{correction?.status === "failed" ? <small>{correction.error ?? "Accurate final failed; live result retained."}</small> : null}{correction?.status === "completed" && correction.metadata ? <small>{correction.metadata.model} · {correction.metadata.device}/{correction.metadata.computeType} · beam {correction.metadata.beamSize}</small> : null}{translation ? <div className="translation-result"><small>Local translation · {translation.status} · r{translation.revision}{quality ? ` · quality: ${quality.status}` : ""}</small>{displayedTranslation ? <p>{displayedTranslation}</p> : null}{quality?.status === "completed" && quality.rawTranslation !== quality.correctedTranslation ? <small>Raw final translation: {quality.rawTranslation}</small> : null}{quality?.appliedCorrections?.length ? <small>Quality corrections: {quality.appliedCorrections.map((item) => item.rule).join(", ")}</small> : null}{quality?.fallback ? <small>{quality.error ?? "Quality pass failed"}; raw final translation retained.</small> : null}{translation.error ? <small>{translation.error}; source transcript retained.</small> : null}{translation.metadata ? <small>{translation.metadata.sourceLanguage}→{translation.metadata.targetLanguage} · {translation.metadata.model} · {translation.metadata.device}/{translation.metadata.computeType}</small> : null}</div> : null}</article>;
       })}</section> : null}
 
       {!usesLiveTranscriptState && segments.length > 0 ? <section className="live-segments"><h2>Segments</h2>{segments.map((segment, index) => <article className="segment-row" key={segment.id ?? `${segment.start}-${index}`}><span>{segment.start.toFixed(2)}s → {segment.end.toFixed(2)}s</span><p>{segment.text}</p></article>)}</section> : null}

@@ -31,6 +31,15 @@ from ..services.live_translation import (
     PersistentLocalMarianTranslator,
     TranslationRequest,
     TranslationSnapshot,
+    TranslationStatus,
+)
+from ..services.translation_quality import (
+    DeterministicTranslationQualityProcessor,
+    LocalTranslationQualityQueue,
+    QualityStatus,
+    TranslationQualityConfig,
+    TranslationQualityRequest,
+    TranslationQualitySnapshot,
 )
 from ..services.live_sessions import (
     create_live_session,
@@ -96,6 +105,7 @@ _live_state_registry = LiveTranscriptStateRegistry(
 _final_queue: LocalFinalTranscriptionQueue | None = None
 _glossary_manager: GlossaryManager | None = None
 _translation_queue: LocalLiveTranslationQueue | None = None
+_translation_quality_queue: LocalTranslationQualityQueue | None = None
 _segment_glossaries: dict[
     tuple[str, str], GlossarySnapshot | DisabledGlossarySnapshot | None
 ] = {}
@@ -153,6 +163,22 @@ def _get_translation_queue() -> LocalLiveTranslationQueue:
     return _translation_queue
 
 
+def _get_translation_quality_queue() -> LocalTranslationQualityQueue:
+    global _translation_quality_queue
+    if _translation_quality_queue is None:
+        config = TranslationQualityConfig(
+            timeout_seconds=_runtime_settings.live_translation_quality_timeout_seconds,
+            max_retries=_runtime_settings.live_translation_quality_max_retries,
+            worker_concurrency=_runtime_settings.live_translation_quality_worker_concurrency,
+            queue_capacity=_runtime_settings.live_translation_quality_queue_capacity,
+        )
+        _translation_quality_queue = LocalTranslationQualityQueue(
+            config,
+            DeterministicTranslationQualityProcessor(),
+        )
+    return _translation_quality_queue
+
+
 async def shutdown_final_transcription_queue() -> None:
     global _final_queue
     queue, _final_queue = _final_queue, None
@@ -163,6 +189,13 @@ async def shutdown_final_transcription_queue() -> None:
 async def shutdown_live_translation_queue() -> None:
     global _translation_queue
     queue, _translation_queue = _translation_queue, None
+    if queue is not None:
+        await queue.close()
+
+
+async def shutdown_translation_quality_queue() -> None:
+    global _translation_quality_queue
+    queue, _translation_quality_queue = _translation_quality_queue, None
     if queue is not None:
         await queue.close()
 
@@ -408,6 +441,8 @@ async def _enqueue_live_translation(
         context_segment_ids=tuple(item.segment_id for item in previous),
         context_texts=tuple(item.text for item in previous),
         glossary=glossary,
+        start_ms=update.start_ms,
+        end_ms=update.end_ms,
     )
     try:
         outcome = await queue.enqueue(request, _handle_translation_status)
@@ -444,6 +479,84 @@ async def _handle_translation_status(snapshot: TranslationSnapshot) -> None:
     await _send_to_current_connection(
         snapshot.session_id,
         _event("translation_state", **snapshot.as_dict(), metrics=queue.metrics()),
+    )
+    if (
+        _runtime_settings.live_translation_quality_enabled
+        and snapshot.status is TranslationStatus.COMPLETED
+        and snapshot.result is not None
+    ):
+        await _enqueue_translation_quality(snapshot)
+
+
+async def _enqueue_translation_quality(snapshot: TranslationSnapshot) -> None:
+    if snapshot.result is None:
+        return
+    queue = _get_translation_quality_queue()
+    metadata = snapshot.result.metadata
+    request = TranslationQualityRequest(
+        session_id=snapshot.session_id,
+        segment_id=snapshot.segment_id,
+        translation_revision=snapshot.translation_revision,
+        source_text=snapshot.source_text,
+        raw_model_translation=snapshot.result.raw_text,
+        final_translation=snapshot.result.text,
+        source_language=metadata.source_language,
+        target_language=metadata.target_language,
+        glossary_version=metadata.glossary_version,
+        start_ms=metadata.start_ms,
+        end_ms=metadata.end_ms,
+        glossary=snapshot.glossary,
+    )
+    try:
+        outcome = await queue.enqueue(request, _handle_translation_quality_status)
+    except (asyncio.QueueFull, ValueError) as exc:
+        await _send_to_current_connection(
+            snapshot.session_id,
+            _event(
+                "translation_quality_state",
+                jobId=request.job_id,
+                sessionId=request.session_id,
+                segmentId=request.segment_id,
+                translationRevision=request.translation_revision,
+                status=QualityStatus.FAILED.value,
+                sourceText=request.source_text,
+                rawModelTranslation=request.raw_model_translation,
+                rawTranslation=request.final_translation,
+                correctedTranslation=request.final_translation,
+                sourceLanguage=request.source_language,
+                targetLanguage=request.target_language,
+                glossaryVersion=request.glossary_version,
+                startMs=request.start_ms,
+                endMs=request.end_ms,
+                fallback=True,
+                error=str(exc),
+                metrics=queue.metrics(),
+            ),
+        )
+        return
+    if not outcome.accepted:
+        await _send_to_current_connection(
+            snapshot.session_id,
+            _event(
+                "translation_quality_state",
+                **outcome.snapshot.as_dict(),
+                rejectedReason=outcome.reason,
+                metrics=queue.metrics(),
+            ),
+        )
+
+
+async def _handle_translation_quality_status(
+    snapshot: TranslationQualitySnapshot,
+) -> None:
+    queue = _get_translation_quality_queue()
+    await _send_to_current_connection(
+        snapshot.session_id,
+        _event(
+            "translation_quality_state",
+            **snapshot.as_dict(),
+            metrics=queue.metrics(),
+        ),
     )
 
 
@@ -804,6 +917,20 @@ async def live_websocket(websocket: WebSocket, session_id: str) -> None:
                                     for item in _translation_queue.snapshot(session_id)
                                 ],
                                 metrics=_translation_queue.metrics(),
+                            )
+                        )
+                    if (
+                        _runtime_settings.live_translation_quality_enabled
+                        and _translation_quality_queue is not None
+                    ):
+                        await websocket.send_json(
+                            _event(
+                                "translation_quality_snapshot",
+                                qualityResults=[
+                                    item.as_dict()
+                                    for item in _translation_quality_queue.snapshot(session_id)
+                                ],
+                                metrics=_translation_quality_queue.metrics(),
                             )
                         )
                 elif command_type == "pcm_chunk":

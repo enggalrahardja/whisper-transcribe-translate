@@ -219,3 +219,24 @@ The feature flag is off by default, requires the PCM semantic-state path, and
 does not change MongoDB schemas, the legacy recorder, Whisper `base`, or any
 cloud provider. See `docs/stage7-local-live-translation.md` for lifecycle,
 configuration, limitations, and validation status.
+
+## Stage 8 addendum
+
+Stage 8 adds a separate runtime-only quality consumer after a Stage 7
+translation reaches `completed`. Preview translations bypass it. The quality
+registry retains raw model translation, the final Stage 7 translation,
+corrected translation, applied rules, timestamps, language metadata, and
+pending/processing/completed/failed status without modifying the source
+transcript or translation preview.
+
+The processor is deterministic rule-based local code: terminology enforcement,
+whitespace/punctuation/capitalization normalization, and consecutive repeated
+phrase removal. Dates, times, numbers, codes, versions, and speaker labels are
+marker-protected while rules run. A postcondition compares digit, negation, and
+speaker-attribution invariants; violation or runtime failure falls back to the
+unaltered final translation.
+
+Queue capacity, concurrency, retry, and timeout remain bounded. State and
+metrics are process-local and reconnectable over WebSocket. Both quality flags
+default off; no database schema, legacy behavior, model/provider selection, or
+cloud integration changed. See `docs/stage8-final-translation-quality.md`.

@@ -34,6 +34,12 @@ text and applied corrections. The glossary does not change any model's
 accuracy classification or benchmark status, and is not a substitute for
 acoustic accuracy. It is disabled by default.
 
+## Local final-translation quality layer
+
+| Component/version | Functionality | Accuracy classification | Streaming support | Translation support | Diarization | Hardware requirement | Privacy implication | Pricing | Benchmark status | Known limitations |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Stage 8 deterministic rules, repository revision | Post-process only completed local translations: punctuation, capitalization, whitespace, repeated phrases, and terminology | Unclassified; this is formatting/constraint enforcement, not an accuracy model | No; bounded asynchronous final-result job | Language-neutral formatting with configured glossary target forms | No | Negligible CPU/RAM relative to translation inference; no GPU required | Source/final translation and glossary remain local | local rule-based code — no per-request fee; normal infrastructure costs remain | Automated rule, safety, queue, fallback, and integration tests pass; internal human quality review not run | Cannot repair semantic mistranslation; conservative invariant checks cover digits, listed negations, and recognized speaker patterns rather than full semantic equivalence |
+
 ## Implemented translation providers
 
 | Provider/model version | Functionality | Accuracy classification | Streaming support | Translation support | Diarization | Hardware requirement | Privacy implication | Pricing | Benchmark status | Known limitations |

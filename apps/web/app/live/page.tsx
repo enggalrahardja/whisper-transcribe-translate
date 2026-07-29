@@ -101,10 +101,58 @@ type GlossaryMetrics = {
   reloadCount: number;
   conflicts: number;
 };
+type TranslationStatus = "pending" | "processing" | "preview" | "completed" | "failed";
+type LiveTranslation = {
+  jobId: string;
+  sessionId: string;
+  segmentId: string;
+  sourceRevision: number;
+  sourceState: "stable" | "final";
+  sourceText: string;
+  status: TranslationStatus;
+  revision: number;
+  attempt: number;
+  translatedText?: string | null;
+  rawTranslatedText?: string | null;
+  glossaryTermsApplied?: string[];
+  metadata?: {
+    provider: string;
+    model: string;
+    checkpoint: string;
+    localCloud: "local" | "cloud";
+    sourceLanguage: string;
+    detectedLanguage: string;
+    targetLanguage: string;
+    contextSegmentIds: string[];
+    glossaryVersion?: string | null;
+    device: string;
+    computeType: string;
+    latencyMs: number;
+    revision: number;
+    languageDetectionConfidence?: number | null;
+    createdAt: string;
+    updatedAt: string;
+  } | null;
+  error?: string | null;
+};
+type TranslationMetrics = {
+  queuedJobs: number;
+  previewLatencyMs: number;
+  finalLatencyMs: number;
+  completed: number;
+  failed: number;
+  retries: number;
+  queueDepth: number;
+  termsApplied: number;
+  replacementCount: number;
+  detectionConfidence: number;
+};
 
 const audioTransport: AudioTransport = process.env.NEXT_PUBLIC_LIVE_AUDIO_TRANSPORT === "pcm" ? "pcm" : "legacy";
 const liveTranscriptStateEnabled = process.env.NEXT_PUBLIC_LIVE_TRANSCRIPT_STATE_ENABLED === "true";
 const usesLiveTranscriptState = audioTransport === "pcm" && liveTranscriptStateEnabled;
+const liveTranslationEnabled = process.env.NEXT_PUBLIC_LIVE_TRANSLATION_ENABLED === "true";
+const usesLiveTranslation = usesLiveTranscriptState && liveTranslationEnabled;
 const emptyPcmMetrics: PcmTransportMetrics = {
   chunksSent: 0,
   chunksAcknowledged: 0,
@@ -152,6 +200,18 @@ const emptyGlossaryMetrics: GlossaryMetrics = {
   correctionLatencyMs: 0,
   reloadCount: 0,
   conflicts: 0,
+};
+const emptyTranslationMetrics: TranslationMetrics = {
+  queuedJobs: 0,
+  previewLatencyMs: 0,
+  finalLatencyMs: 0,
+  completed: 0,
+  failed: 0,
+  retries: 0,
+  queueDepth: 0,
+  termsApplied: 0,
+  replacementCount: 0,
+  detectionConfidence: 0,
 };
 
 const defaultLiveSettings = {
@@ -237,6 +297,8 @@ export default function LivePage() {
   const [finalCorrections, setFinalCorrections] = useState<Record<string, FinalCorrection>>({});
   const [finalCorrectionMetrics, setFinalCorrectionMetrics] = useState<FinalCorrectionMetrics>(emptyFinalCorrectionMetrics);
   const [glossaryMetrics, setGlossaryMetrics] = useState<GlossaryMetrics | null>(null);
+  const [translations, setTranslations] = useState<Record<string, LiveTranslation>>({});
+  const [translationMetrics, setTranslationMetrics] = useState<TranslationMetrics>(emptyTranslationMetrics);
 
   const socketRef = useRef<WebSocket | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -364,6 +426,7 @@ export default function LivePage() {
         state?: VadRuntimeMetrics["state"] | TranscriptState;
         updates?: LiveTranscriptUpdate[];
         jobs?: FinalCorrection[];
+        translations?: LiveTranslation[];
         jobId?: string;
         sessionId?: string;
         segmentId?: string;
@@ -383,6 +446,12 @@ export default function LivePage() {
         rawText?: string | null;
         glossaryCorrections?: GlossaryCorrection[];
         glossaryVersion?: string | null;
+        sourceRevision?: number;
+        sourceState?: "stable" | "final";
+        sourceText?: string;
+        translatedText?: string | null;
+        rawTranslatedText?: string | null;
+        glossaryTermsApplied?: string[];
       };
       if (event.type === "processing") setConnection("processing");
       if (event.type === "connected") setConnection("connected");
@@ -480,6 +549,44 @@ export default function LivePage() {
           correctionLatencyMs: event.glossaryMetrics.correction_latency_ms ?? 0,
           reloadCount: event.glossaryMetrics.glossary_reload_count ?? 0,
           conflicts: event.glossaryMetrics.correction_conflicts ?? 0,
+        });
+      }
+      if (event.type === "translation_state_snapshot" && event.translations) {
+        setTranslations(Object.fromEntries(
+          event.translations
+            .filter((item) => item.sessionId === sessionIdRef.current)
+            .map((item) => [item.segmentId, item]),
+        ));
+      }
+      if (
+        event.type === "translation_state" && event.sessionId === sessionIdRef.current
+        && event.segmentId && event.jobId && event.revision !== undefined
+        && event.status && ["pending", "processing", "preview", "completed", "failed"].includes(event.status)
+      ) {
+        const update = event as unknown as LiveTranslation;
+        setTranslations((currentItems) => {
+          const current = currentItems[update.segmentId];
+          if (!current && update.revision !== 1) return currentItems;
+          if (current && (
+            update.revision < current.revision
+            || update.revision > current.revision + 1
+            || (update.revision === current.revision && update.jobId !== current.jobId)
+          )) return currentItems;
+          return { ...currentItems, [update.segmentId]: update };
+        });
+      }
+      if ((event.type === "translation_state" || event.type === "translation_state_snapshot") && event.metrics) {
+        setTranslationMetrics({
+          queuedJobs: event.metrics.queued_translation_jobs ?? 0,
+          previewLatencyMs: event.metrics.preview_latency_ms ?? 0,
+          finalLatencyMs: event.metrics.final_translation_latency_ms ?? 0,
+          completed: event.metrics.completed ?? 0,
+          failed: event.metrics.failed ?? 0,
+          retries: event.metrics.retries ?? 0,
+          queueDepth: event.metrics.queue_depth ?? 0,
+          termsApplied: event.metrics.glossary_terms_applied ?? 0,
+          replacementCount: event.metrics.replacement_count ?? 0,
+          detectionConfidence: event.metrics.language_detection_confidence ?? 0,
         });
       }
       if (event.type === "error") {
@@ -593,6 +700,8 @@ export default function LivePage() {
     setFinalCorrections({});
     setFinalCorrectionMetrics(emptyFinalCorrectionMetrics);
     setGlossaryMetrics(null);
+    setTranslations({});
+    setTranslationMetrics(emptyTranslationMetrics);
 
     let created: LiveSession | null = null;
     try {
@@ -677,6 +786,7 @@ export default function LivePage() {
     setSegments([]);
     setLiveTranscriptUpdates({});
     setFinalCorrections({});
+    setTranslations({});
   }
 
   useEffect(() => {
@@ -806,6 +916,13 @@ export default function LivePage() {
           <div><span>Unmatched / conflicts</span><strong>{glossaryMetrics.unmatchedAliases} / {glossaryMetrics.conflicts}</strong></div>
           <div><span>Correction latency</span><strong>{glossaryMetrics.correctionLatencyMs.toFixed(3)}ms</strong></div>
         </div> : null}
+        {usesLiveTranslation ? <div className="live-status-grid">
+          <div><span>Translation jobs / queue</span><strong>{translationMetrics.queuedJobs} / {translationMetrics.queueDepth}</strong></div>
+          <div><span>Preview / final latency</span><strong>{translationMetrics.previewLatencyMs.toFixed(0)}ms / {translationMetrics.finalLatencyMs.toFixed(0)}ms</strong></div>
+          <div><span>Completed / failed / retries</span><strong>{translationMetrics.completed} / {translationMetrics.failed} / {translationMetrics.retries}</strong></div>
+          <div><span>Terms / replacements</span><strong>{translationMetrics.termsApplied} / {translationMetrics.replacementCount}</strong></div>
+          <div><span>Detection confidence</span><strong>{translationMetrics.detectionConfidence.toFixed(3)}</strong></div>
+        </div> : null}
         <div className="live-controls">
           <button disabled={!canStart} onClick={start} type="button">Start</button>
           <button className="secondary" disabled={!(["active", "paused"] as UiStatus[]).includes(uiStatus)} onClick={pauseOrResume} type="button">{uiStatus === "paused" ? "Resume" : "Pause"}</button>
@@ -827,7 +944,8 @@ export default function LivePage() {
 
       {usesLiveTranscriptState && semanticSegments.length > 0 ? <section className="live-segments"><h2>Semantic segments</h2>{semanticSegments.map((segment) => {
         const correction = finalCorrections[segment.segmentId];
-        return <article className="segment-row" key={segment.segmentId}><span>{(segment.startMs / 1000).toFixed(2)}s to {(segment.endMs / 1000).toFixed(2)}s · {segment.state} · r{segment.revision}{correction ? ` · accurate final: ${correction.status}` : ""}</span><p>{segment.text}</p>{segment.rawText && segment.rawText !== segment.text ? <small>Raw model output: {segment.rawText}</small> : null}{segment.glossaryCorrections?.length ? <small>Glossary: {segment.glossaryCorrections.map((item) => `${item.source} → ${item.replacement}`).join(", ")}</small> : null}{correction?.status === "failed" ? <small>{correction.error ?? "Accurate final failed; live result retained."}</small> : null}{correction?.status === "completed" && correction.metadata ? <small>{correction.metadata.model} · {correction.metadata.device}/{correction.metadata.computeType} · beam {correction.metadata.beamSize}</small> : null}</article>;
+        const translation = translations[segment.segmentId];
+        return <article className="segment-row" key={segment.segmentId}><span>{(segment.startMs / 1000).toFixed(2)}s to {(segment.endMs / 1000).toFixed(2)}s · {segment.state} · r{segment.revision}{correction ? ` · accurate final: ${correction.status}` : ""}</span><p>{segment.text}</p>{segment.rawText && segment.rawText !== segment.text ? <small>Raw model output: {segment.rawText}</small> : null}{segment.glossaryCorrections?.length ? <small>Glossary: {segment.glossaryCorrections.map((item) => `${item.source} → ${item.replacement}`).join(", ")}</small> : null}{correction?.status === "failed" ? <small>{correction.error ?? "Accurate final failed; live result retained."}</small> : null}{correction?.status === "completed" && correction.metadata ? <small>{correction.metadata.model} · {correction.metadata.device}/{correction.metadata.computeType} · beam {correction.metadata.beamSize}</small> : null}{translation ? <div className="translation-result"><small>Local translation · {translation.status} · r{translation.revision}</small>{translation.translatedText ? <p>{translation.translatedText}</p> : null}{translation.error ? <small>{translation.error}; source transcript retained.</small> : null}{translation.metadata ? <small>{translation.metadata.sourceLanguage}→{translation.metadata.targetLanguage} · {translation.metadata.model} · {translation.metadata.device}/{translation.metadata.computeType}</small> : null}</div> : null}</article>;
       })}</section> : null}
 
       {!usesLiveTranscriptState && segments.length > 0 ? <section className="live-segments"><h2>Segments</h2>{segments.map((segment, index) => <article className="segment-row" key={segment.id ?? `${segment.start}-${index}`}><span>{segment.start.toFixed(2)}s → {segment.end.toFixed(2)}s</span><p>{segment.text}</p></article>)}</section> : null}

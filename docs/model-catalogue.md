@@ -34,10 +34,11 @@ text and applied corrections. The glossary does not change any model's
 accuracy classification or benchmark status, and is not a substitute for
 acoustic accuracy. It is disabled by default.
 
-## Implemented translation provider
+## Implemented translation providers
 
 | Provider/model version | Functionality | Accuracy classification | Streaming support | Translation support | Diarization | Hardware requirement | Privacy implication | Pricing | Benchmark status | Known limitations |
 |---|---|---|---|---|---|---|---|---|---|---|
+| Hugging Face Transformers `<5`; Marian `Helsinki-NLP/opus-mt-id-en`, runtime revision/checkpoint recorded | Local Indonesian-to-English text translation from stable/final semantic transcripts | Unclassified; upstream Tatoeba score is not an internal application result | Application preview/final events; no token streaming | `id` → `en` by default; model/language pair configurable | No | CPU supported; CUDA optional; model download/cache and local RAM/VRAM required | Transcript and glossary remain on the host | local model — no per-request fee; infrastructure, storage, electricity, and operations still cost money | Automated state/queue tests and synthetic CPU/glossary smoke pass; internal translation benchmark and microphone E2E not run | Pair-specific checkpoint; 512-token model input; prior segments are a bounded batch context and Marian has no cross-segment attention; glossary marker survival depends on model output; code-switching and domain accuracy unmeasured |
 | `deep-translator` GoogleTranslator (remote version not pinned by result) | Text translation after ASR | Unclassified | No | Text translation to provider-supported targets | No | Network access; negligible local inference hardware | Transcript text leaves the local system for Google service processing | Not declared by repository; terms/cost must be verified before production | Not run | Not local-first; remote model/version and data handling are not recorded; no live stable translation |
 
 ## OpenAI provider options (documentation only; not integrated)

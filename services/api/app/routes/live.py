@@ -25,6 +25,13 @@ from ..services.live_transcript_state import (
     LiveTranscriptUpdate,
     TranscriptState,
 )
+from ..services.live_translation import (
+    LiveTranslationConfig,
+    LocalLiveTranslationQueue,
+    PersistentLocalMarianTranslator,
+    TranslationRequest,
+    TranslationSnapshot,
+)
 from ..services.live_sessions import (
     create_live_session,
     fail_live_session,
@@ -88,6 +95,10 @@ _live_state_registry = LiveTranscriptStateRegistry(
 )
 _final_queue: LocalFinalTranscriptionQueue | None = None
 _glossary_manager: GlossaryManager | None = None
+_translation_queue: LocalLiveTranslationQueue | None = None
+_segment_glossaries: dict[
+    tuple[str, str], GlossarySnapshot | DisabledGlossarySnapshot | None
+] = {}
 
 
 def _get_glossary_manager() -> GlossaryManager:
@@ -119,9 +130,39 @@ def _get_final_queue() -> LocalFinalTranscriptionQueue:
     return _final_queue
 
 
+def _get_translation_queue() -> LocalLiveTranslationQueue:
+    global _translation_queue
+    if _translation_queue is None:
+        config = LiveTranslationConfig(
+            model=_runtime_settings.live_translation_model,
+            model_revision=_runtime_settings.live_translation_model_revision,
+            source_language=_runtime_settings.live_translation_source_language,
+            target_language=_runtime_settings.live_translation_target_language,
+            device=_runtime_settings.live_translation_device,
+            compute_type=_runtime_settings.live_translation_compute_type,
+            beam_size=_runtime_settings.live_translation_beam_size,
+            timeout_seconds=_runtime_settings.live_translation_timeout_seconds,
+            max_retries=_runtime_settings.live_translation_max_retries,
+            worker_concurrency=_runtime_settings.live_translation_worker_concurrency,
+            queue_capacity=_runtime_settings.live_translation_queue_capacity,
+            context_segments=_runtime_settings.live_translation_context_segments,
+        )
+        _translation_queue = LocalLiveTranslationQueue(
+            config, PersistentLocalMarianTranslator(config)
+        )
+    return _translation_queue
+
+
 async def shutdown_final_transcription_queue() -> None:
     global _final_queue
     queue, _final_queue = _final_queue, None
+    if queue is not None:
+        await queue.close()
+
+
+async def shutdown_live_translation_queue() -> None:
+    global _translation_queue
+    queue, _translation_queue = _translation_queue, None
     if queue is not None:
         await queue.close()
 
@@ -282,7 +323,12 @@ async def _transcribe_vad_segments(
             ),
         )
         if detailed is not None and not detailed.duplicate:
-            await _send_live_transcript_lifecycle(session_id, detailed)
+            if (
+                _runtime_settings.live_accurate_final_enabled
+                and _runtime_settings.live_translation_enabled
+            ):
+                _segment_glossaries[(session_id, detailed.segment_id)] = glossary
+            await _send_live_transcript_lifecycle(session_id, detailed, glossary)
             if _runtime_settings.live_accurate_final_enabled:
                 await _enqueue_accurate_final(
                     session_id,
@@ -296,6 +342,7 @@ async def _transcribe_vad_segments(
 async def _send_live_transcript_lifecycle(
     session_id: str,
     result: PcmTranscriptionResult,
+    glossary: GlossarySnapshot | DisabledGlossarySnapshot | None = None,
 ) -> None:
     common = {
         "session_id": session_id,
@@ -332,6 +379,72 @@ async def _send_live_transcript_lifecycle(
                 ),
             ),
         )
+        if (
+            _runtime_settings.live_translation_enabled
+            and state in {TranscriptState.STABLE, TranscriptState.FINAL}
+        ):
+            await _enqueue_live_translation(update, glossary)
+
+
+async def _enqueue_live_translation(
+    update: LiveTranscriptUpdate,
+    glossary: GlossarySnapshot | DisabledGlossarySnapshot | None,
+) -> None:
+    queue = _get_translation_queue()
+    previous = [
+        item
+        for item in _live_state_registry.snapshot(update.session_id)
+        if item.segment_id != update.segment_id
+        and (item.sequence_start, item.sequence_end) < (update.sequence_start, update.sequence_end)
+    ][-queue.config.context_segments :]
+    request = TranslationRequest(
+        session_id=update.session_id,
+        segment_id=update.segment_id,
+        source_revision=update.revision,
+        source_state=update.state,
+        source_text=update.text,
+        source_language=queue.config.source_language,
+        target_language=queue.config.target_language,
+        context_segment_ids=tuple(item.segment_id for item in previous),
+        context_texts=tuple(item.text for item in previous),
+        glossary=glossary,
+    )
+    try:
+        outcome = await queue.enqueue(request, _handle_translation_status)
+    except (asyncio.QueueFull, ValueError) as exc:
+        await _send_to_current_connection(
+            update.session_id,
+            _event(
+                "translation_state",
+                sessionId=update.session_id,
+                segmentId=update.segment_id,
+                sourceRevision=update.revision,
+                sourceState=update.state.value,
+                sourceText=update.text,
+                status="failed",
+                error=str(exc),
+                metrics=queue.metrics(),
+            ),
+        )
+        return
+    if not outcome.accepted:
+        await _send_to_current_connection(
+            update.session_id,
+            _event(
+                "translation_state",
+                **outcome.snapshot.as_dict(),
+                rejectedReason=outcome.reason,
+                metrics=queue.metrics(),
+            ),
+        )
+
+
+async def _handle_translation_status(snapshot: TranslationSnapshot) -> None:
+    queue = _get_translation_queue()
+    await _send_to_current_connection(
+        snapshot.session_id,
+        _event("translation_state", **snapshot.as_dict(), metrics=queue.metrics()),
+    )
 
 
 async def _enqueue_accurate_final(
@@ -367,6 +480,7 @@ async def _enqueue_accurate_final(
     try:
         snapshot, duplicate = await queue.enqueue(request, _handle_final_job_status)
     except asyncio.QueueFull as exc:
+        _segment_glossaries.pop((session_id, live_result.segment_id), None)
         await _send_to_current_connection(
             session_id,
             _event(
@@ -421,9 +535,16 @@ async def _handle_final_job_status(snapshot: FinalJobSnapshot) -> None:
             if outcome.accepted:
                 queue.record_replacement()
                 payload["update"] = corrected.as_dict()
+                if _runtime_settings.live_translation_enabled:
+                    await _enqueue_live_translation(
+                        corrected,
+                        _segment_glossaries.get((corrected.session_id, corrected.segment_id)),
+                    )
             else:
                 payload["status"] = FinalJobStatus.FAILED.value
                 payload["error"] = outcome.reason
+    if snapshot.status in {FinalJobStatus.COMPLETED, FinalJobStatus.FAILED}:
+        _segment_glossaries.pop((snapshot.session_id, snapshot.segment_id), None)
     await _send_to_current_connection(
         snapshot.session_id,
         _event(
@@ -672,6 +793,17 @@ async def live_websocket(websocket: WebSocket, session_id: str) -> None:
                                     for job in _final_queue.snapshot(session_id)
                                 ],
                                 metrics=_final_queue.metrics(),
+                            )
+                        )
+                    if _runtime_settings.live_translation_enabled and _translation_queue is not None:
+                        await websocket.send_json(
+                            _event(
+                                "translation_state_snapshot",
+                                translations=[
+                                    item.as_dict()
+                                    for item in _translation_queue.snapshot(session_id)
+                                ],
+                                metrics=_translation_queue.metrics(),
                             )
                         )
                 elif command_type == "pcm_chunk":

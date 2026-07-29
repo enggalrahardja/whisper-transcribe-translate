@@ -21,6 +21,15 @@ class GlossaryTerm:
     priority: int
     language: str
     active: bool
+    preferred_translations: tuple[tuple[str, str], ...] = ()
+    do_not_translate: bool = False
+
+    def preferred_translation(self, language: str) -> str | None:
+        requested = language.casefold().split("-", 1)[0]
+        for target, value in self.preferred_translations:
+            if target.casefold().split("-", 1)[0] == requested:
+                return value
+        return None
 
 
 @dataclass(frozen=True)
@@ -313,7 +322,29 @@ def _parse_term(value: object) -> GlossaryTerm:
         priority=priority,
         language=str(value.get("language", "*")).strip() or "*",
         active=bool(value.get("active", True)),
+        preferred_translations=_parse_preferred_translations(
+            value.get("preferredTranslations", {}), preferred
+        ),
+        do_not_translate=bool(value.get("doNotTranslate", False)),
     )
+
+
+def _parse_preferred_translations(
+    value: object,
+    preferred: str,
+) -> tuple[tuple[str, str], ...]:
+    if not isinstance(value, dict):
+        raise ValueError(f"Glossary preferredTranslations for {preferred} must be an object")
+    translations: list[tuple[str, str]] = []
+    for language, translated in value.items():
+        language_value = str(language).strip()
+        translated_value = str(translated).strip()
+        if not language_value or not translated_value:
+            raise ValueError(
+                f"Glossary preferredTranslations for {preferred} cannot contain empty values"
+            )
+        translations.append((language_value, translated_value))
+    return tuple(sorted(translations, key=lambda item: item[0].casefold()))
 
 
 def _whole_term_pattern(term: str) -> re.Pattern[str]:

@@ -91,9 +91,9 @@ web live flow.
 - Device/inference controls: auto/CPU/CUDA, FP16, beam size, temperature,
   prompt, timestamps, and concurrency in the persisted application settings.
 - Legacy desktop default: `base`/CPU in `src/logic/settings.py`.
-- Implemented translation: `deep_translator.GoogleTranslator`, configured only
-  as `google`. It is a cloud/network dependency; no local translation model is
-  implemented.
+- Legacy translation remains `deep_translator.GoogleTranslator`, configured
+  only as `google`. Stage 7 adds a separate optional local Marian runtime for
+  semantic PCM stable/final transcripts; it does not alter the legacy route.
 - OpenAI API models are mentioned in planning documentation only. There is no
   Stage 1 OpenAI provider integration or credential path.
 
@@ -199,3 +199,23 @@ priority overlaps. Metrics remain process-local. The feature flag is off by
 default, no production schema changes were introduced, and legacy, translation,
 diarization, provider selection, and local `base` defaults are unchanged. See
 `docs/stage6-local-glossary.md` for file structure and matching/reload rules.
+
+## Stage 7 addendum
+
+Stage 7 adds a runtime-only local translation consumer after semantic transcript
+state. Accepted `stable` source revision creates a preview job; each newer
+`final` source revision creates a final job, including the controlled
+accurate-final replacement. Translation state is keyed separately by
+session/segment and never mutates the source transcript registry.
+
+The bounded queue rejects duplicate and stale source revisions, caps queue
+capacity/concurrency/retries/timeout, and retains one lazily loaded Marian
+model per API process. Events and reconnect snapshots carry provider,
+model/checkpoint, local/cloud, language pair/detection, context IDs, glossary
+version, device/compute type, latency, revision, and timestamps. Glossary
+terms can protect text from translation or force a preferred target form.
+
+The feature flag is off by default, requires the PCM semantic-state path, and
+does not change MongoDB schemas, the legacy recorder, Whisper `base`, or any
+cloud provider. See `docs/stage7-local-live-translation.md` for lifecycle,
+configuration, limitations, and validation status.

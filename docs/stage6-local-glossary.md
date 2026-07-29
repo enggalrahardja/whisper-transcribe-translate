@@ -14,6 +14,8 @@ Each entry uses:
   "preferredSpelling": "SMARTHub",
   "aliases": ["Smart Hub", "SmartHub"],
   "doNotChange": false,
+  "doNotTranslate": true,
+  "preferredTranslations": {"en": "SMARTHub"},
   "category": "product",
   "priority": 100,
   "language": "*",
@@ -23,6 +25,9 @@ Each entry uses:
 
 `language` accepts a language/tag or `*`; `auto` sessions consider all active
 languages. Inactive entries are not loaded into a snapshot.
+`doNotTranslate` and `preferredTranslations` are optional Stage 7 extensions:
+they protect terminology or select an exact target-language form without
+changing Stage 6 transcript correction behavior.
 
 ## Per-segment flow
 

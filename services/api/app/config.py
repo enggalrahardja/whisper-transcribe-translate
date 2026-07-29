@@ -51,6 +51,19 @@ class Settings(BaseSettings):
     live_glossary_enabled: bool = False
     live_glossary_path: Path = PROJECT_ROOT / "config/glossary.development.json"
     live_glossary_prompt_max_terms: int = 64
+    live_translation_enabled: bool = False
+    live_translation_model: str = "Helsinki-NLP/opus-mt-id-en"
+    live_translation_model_revision: str = "main"
+    live_translation_source_language: str = "id"
+    live_translation_target_language: str = "en"
+    live_translation_device: str = "auto"
+    live_translation_compute_type: str = "auto"
+    live_translation_beam_size: int = 4
+    live_translation_timeout_seconds: float = 20.0
+    live_translation_max_retries: int = 1
+    live_translation_worker_concurrency: int = 1
+    live_translation_queue_capacity: int = 64
+    live_translation_context_segments: int = 3
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

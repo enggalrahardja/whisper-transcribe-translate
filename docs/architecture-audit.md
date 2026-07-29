@@ -319,3 +319,18 @@ Persistence remains optional and is not a durable processing queue. No legacy
 storage is removed, no raw chunk is stored in Mongo, and no cloud/provider or
 production behavior changes while the flag is off. See
 `docs/stage12-session-segment-persistence.md`.
+
+## Stage 13 addendum
+
+Stage 13 reorganizes the existing live page around session/device controls,
+source and translated transcript, processing status, and metrics. Semantic data
+is projected into one keyed block per segment. Pure merge/display precedence
+functions make reconnect and revision replacement deterministic, while raw
+metadata moves behind expandable details.
+
+Viewport-aware auto-scroll stops when the user reads earlier content and shows
+a new-result indicator. Device selection/input level, reconnect, empty, error,
+and degraded-persistence states are explicit. Desktop uses paired source and
+translation columns; mobile stacks them without adding nested scrolling.
+Legacy rendering and all default-off flags remain unchanged. See
+`docs/stage13-live-transcription-ui.md`.

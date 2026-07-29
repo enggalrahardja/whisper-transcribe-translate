@@ -6,6 +6,7 @@ import { apiBaseUrl, ApplicationSettings, AvailableWhisperModel, getAvailableWhi
 import { languageLabel, sourceLanguages } from "../lib/languages";
 import { PcmAudioCapture } from "./pcm-capture";
 import { PcmTransportMetrics, PcmWebSocketTransport } from "./pcm-transport";
+import { mergeByRevision, nearBottom, transcriptDisplay, translationDisplay } from "../../lib/live-view-model.mjs";
 
 type UiStatus = "idle" | "requesting" | "active" | "paused" | "stopping" | "completed" | "failed";
 type ConnectionStatus = "disconnected" | "connecting" | "connected" | "processing";
@@ -437,6 +438,12 @@ async function responseError(response: Response, fallback: string): Promise<stri
 
 export default function LivePage() {
   const [language, setLanguage] = useState("auto");
+  const [targetLanguage, setTargetLanguage] = useState("en");
+  const [microphones, setMicrophones] = useState<MediaDeviceInfo[]>([]);
+  const [selectedMicrophone, setSelectedMicrophone] = useState("");
+  const [inputLevel, setInputLevel] = useState(0);
+  const [newTranscriptAvailable, setNewTranscriptAvailable] = useState(false);
+  const [persistenceDegraded, setPersistenceDegraded] = useState(false);
   const [model, setModel] = useState("");
   const [availableModels, setAvailableModels] = useState<AvailableWhisperModel[]>([]);
   const [modelsLoading, setModelsLoading] = useState(true);
@@ -474,6 +481,8 @@ export default function LivePage() {
   const gainRef = useRef<GainNode | null>(null);
   const pcmCaptureRef = useRef<PcmAudioCapture | null>(null);
   const pcmTransportRef = useRef<PcmWebSocketTransport | null>(null);
+  const transcriptFeedRef = useRef<HTMLElement | null>(null);
+  const autoScrollRef = useRef(true);
   const buffersRef = useRef<Float32Array[]>([]);
   const sampleCountRef = useRef(0);
   const sampleRateRef = useRef(16000);
@@ -630,6 +639,7 @@ export default function LivePage() {
         fallback?: boolean;
       };
       if (event.type === "processing") setConnection("processing");
+      if (event.type === "persistence_degraded" || (event.metrics?.degraded_sessions ?? 0) > 0) setPersistenceDegraded(true);
       if (event.type === "connected") setConnection("connected");
       if (event.session) applySession(event.session);
       if (event.type === "partial") setConnection("connected");
@@ -652,10 +662,9 @@ export default function LivePage() {
         });
       }
       if (event.type === "transcript_state_snapshot" && event.updates) {
-        setLiveTranscriptUpdates(Object.fromEntries(
-          event.updates
-            .filter((update) => update.sessionId === sessionIdRef.current)
-            .map((update) => [update.segmentId, update]),
+        setLiveTranscriptUpdates((current) => mergeByRevision(
+          current,
+          event.updates!.filter((update) => update.sessionId === sessionIdRef.current),
         ));
       }
       if (
@@ -921,6 +930,7 @@ export default function LivePage() {
     processor.onaudioprocess = (event) => {
       if (!captureEnabledRef.current) return;
       const samples = new Float32Array(event.inputBuffer.getChannelData(0));
+      setInputLevel(Math.min(1, samples.reduce((peak, sample) => Math.max(peak, Math.abs(sample)), 0)));
       if (samples.some((sample) => Math.abs(sample) > 0.01)) lastSoundAtRef.current = Date.now();
       buffersRef.current.push(samples);
       sampleCountRef.current += samples.length;
@@ -940,12 +950,15 @@ export default function LivePage() {
     await capture.start(stream, (chunk) => {
       if (!captureEnabledRef.current) return;
       const samples = new Int16Array(chunk.pcm);
+      let peak = 0;
       for (let index = 0; index < samples.length; index += 1) {
+        peak = Math.max(peak, Math.abs(samples[index]));
         if (Math.abs(samples[index]) > 327) {
           lastSoundAtRef.current = Date.now();
           break;
         }
       }
+      setInputLevel(Math.min(1, peak / 32768));
       pcmTransportRef.current?.enqueue(chunk);
     });
     captureEnabledRef.current = true;
@@ -969,6 +982,7 @@ export default function LivePage() {
     setUiStatus("requesting");
     setMicrophone("Waiting for model validation");
     setError("");
+    setPersistenceDegraded(false);
     intentionalCloseRef.current = false;
     reconnectAttemptsRef.current = 0;
     autoStoppingRef.current = false;
@@ -1008,7 +1022,7 @@ export default function LivePage() {
       created = await response.json() as LiveSession;
       setMicrophone("Requesting permission");
       const stream = await navigator.mediaDevices.getUserMedia({
-        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, ...(selectedMicrophone ? { deviceId: { exact: selectedMicrophone } } : {}) },
         video: false,
       });
       streamRef.current = stream;
@@ -1120,6 +1134,27 @@ export default function LivePage() {
   }, []);
 
   useEffect(() => {
+    const refresh = async () => {
+      if (!navigator.mediaDevices?.enumerateDevices) return;
+      const devices = (await navigator.mediaDevices.enumerateDevices()).filter((item) => item.kind === "audioinput");
+      setMicrophones(devices);
+      setSelectedMicrophone((current) => current || devices[0]?.deviceId || "");
+    };
+    void refresh();
+    navigator.mediaDevices?.addEventListener?.("devicechange", refresh);
+    return () => navigator.mediaDevices?.removeEventListener?.("devicechange", refresh);
+  }, []);
+
+  useEffect(() => {
+    const onScroll = () => {
+      autoScrollRef.current = nearBottom(window.scrollY, window.innerHeight, document.documentElement.scrollHeight, 180);
+      if (autoScrollRef.current) setNewTranscriptAvailable(false);
+    };
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+  }, []);
+
+  useEffect(() => {
     const controller = new AbortController();
     const refreshModels = () => void getAvailableWhisperModels(controller.signal).then((models) => {
       setAvailableModels(models);
@@ -1187,6 +1222,18 @@ export default function LivePage() {
   const hasFinalCorrections = Object.keys(finalCorrections).length > 0;
   const canStart = canConfigure && !modelsLoading && Boolean(model)
     && availableModels.some((item) => item.model === model);
+  const transcriptVersion = semanticSegments.map((item) => `${item.segmentId}:${item.revision}`).join("|");
+
+  useEffect(() => {
+    const feed = transcriptFeedRef.current;
+    if (!feed || !transcriptVersion) return;
+    if (autoScrollRef.current) {
+      feed.scrollIntoView({ behavior: "smooth", block: "end" });
+      setNewTranscriptAvailable(false);
+    } else {
+      setNewTranscriptAvailable(true);
+    }
+  }, [transcriptVersion]);
   return (
     <section className="live-page">
       <header className="live-header">
@@ -1197,6 +1244,8 @@ export default function LivePage() {
       <section className="live-control-card">
         <div className="live-options">
           <label>Language<select disabled={!canConfigure} onChange={(event) => setLanguage(event.target.value)} value={language}>{sourceLanguages.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
+          <label>Target language<select disabled={!canConfigure} onChange={(event) => setTargetLanguage(event.target.value)} value={targetLanguage}><option value="en">English</option><option value="id">Bahasa Indonesia</option></select></label>
+          <label>Microphone<select disabled={!canConfigure} onChange={(event) => setSelectedMicrophone(event.target.value)} value={selectedMicrophone}><option value="">System default</option>{microphones.map((device, index) => <option key={device.deviceId} value={device.deviceId}>{device.label || `Microphone ${index + 1}`}</option>)}</select></label>
           <label>Whisper model<select disabled={!canConfigure || modelsLoading || availableModels.length === 0} onChange={(event) => setModel(event.target.value)} value={model}><option disabled value="">{modelsLoading ? "Loading models…" : "Select an available model"}</option>{availableModels.map(({ model: availableModel }) => <option key={availableModel} value={availableModel}>{availableModel}</option>)}</select></label>
         </div>
         {!modelsLoading && availableModels.length === 0 ? <p className="error-callout" role="alert">No Whisper model is available. <Link href="/settings#whisper-models">Open Settings → Whisper Models</Link> to download one.</p> : null}
@@ -1206,6 +1255,9 @@ export default function LivePage() {
           <div><span>Connection</span><strong>{connection}</strong></div>
           <div><span>Session timer</span><strong>{formatTimer(elapsed)}</strong></div>
           <div><span>Language</span><strong>{languageLabel(language)}</strong></div>
+          <div><span>Target</span><strong>{languageLabel(targetLanguage)}</strong></div>
+          <div><span>Microphone</span><strong>{microphones.find((item) => item.deviceId === selectedMicrophone)?.label || "System default"}</strong></div>
+          <div><span>Input level</span><strong><meter aria-label="Microphone input level" max="1" min="0" value={inputLevel}>{Math.round(inputLevel * 100)}%</meter></strong></div>
           <div><span>Audio transport</span><strong>{audioTransport === "pcm" ? "PCM16 · 16 kHz · 200 ms" : "Legacy WAV"}</strong></div>
         </div>
         {audioTransport === "pcm" ? <div className="live-status-grid">
@@ -1286,7 +1338,27 @@ export default function LivePage() {
         <article><div className="live-transcript-heading"><h2>Final transcript</h2><span>{session?.status ?? "Pending"}</span></div><div className="transcript-text">{finalText || "Stop the session to finalize the transcript."}</div></article>
       </section>}
 
-      {usesLiveTranscriptState && semanticSegments.length > 0 ? <section className="live-segments"><h2>Semantic segments</h2>{semanticSegments.map((segment) => {
+      {usesLiveTranscriptState ? <section className="live-workspace" aria-label="Live transcript workspace" onScroll={(event) => { autoScrollRef.current = nearBottom(event.currentTarget.scrollTop, event.currentTarget.clientHeight, event.currentTarget.scrollHeight); if (autoScrollRef.current) setNewTranscriptAvailable(false); }} ref={transcriptFeedRef}>
+        <div className="workspace-heading"><div><h2>Live transcript</h2><p>One block per audio segment. Source and translation remain separate.</p>{persistenceDegraded ? <p className="status-failed" role="status">Persistence degraded; live audio continues and writes will retry.</p> : null}</div><span aria-live="polite">{connection === "connecting" ? "Reconnecting" : `${semanticSegments.length} segments`}</span></div>
+        {semanticSegments.length === 0 ? <div className="live-empty" role="status">{uiStatus === "requesting" ? "Preparing microphone and session…" : error ? "The session needs attention." : "Start a session to see transcript segments."}</div> : semanticSegments.map((segment) => {
+          const correction = finalCorrections[segment.segmentId];
+          const postprocess = transcriptPostprocess[segment.segmentId];
+          const translation = translations[segment.segmentId];
+          const quality = translationQuality[segment.segmentId];
+          const diarization = diarizationResults[segment.segmentId];
+          const source = transcriptDisplay(segment, correction, postprocess);
+          const target = translationDisplay(translation, quality);
+          return <article className={`live-segment live-segment-${source.state}`} key={segment.segmentId}>
+            <header><div>{diarization?.assignment ? <><strong>{diarization.assignment.speakerLabel}</strong><span>{diarization.assignment.speakerId} · {Math.round(diarization.assignment.confidence * 100)}%</span><button className="text-action" onClick={() => void renameSpeaker(diarization.assignment!.speakerId, diarization.assignment!.speakerLabel)} type="button">Rename speaker</button></> : <><strong>Unassigned speaker</strong><span>{segment.segmentId}</span></>}</div><span className={`state-badge state-${source.state}`}>{source.state}</span></header>
+            <div className="segment-columns"><section aria-label="Source transcript"><h3>Source transcript</h3><p className={source.state === "partial" ? "mutable-text" : ""}>{source.text}</p></section><section aria-label="Translated transcript"><h3>Translation <span>{target.state}</span></h3><p>{target.text || "Translation is not available for this segment."}</p></section></div>
+            <div className="correction-row" aria-label="Processing status"><span>Glossary: {segment.glossaryCorrections?.length ? "completed" : "unchanged"}</span><span>Accurate final: {correction?.status ?? "not queued"}</span><span>Post-process: {postprocess?.status ?? "not queued"}</span><span>Translation quality: {quality?.status ?? "not queued"}</span>{(postprocess?.fallback || quality?.fallback) ? <span className="status-failed">Fallback active</span> : null}</div>
+            <details><summary>Details</summary><dl><div><dt>Time</dt><dd>{(segment.startMs / 1000).toFixed(2)}s–{(segment.endMs / 1000).toFixed(2)}s</dd></div><div><dt>Revision</dt><dd>{segment.revision}</dd></div><div><dt>Model</dt><dd>{segment.model}</dd></div><div><dt>Raw source</dt><dd>{segment.rawText ?? segment.text}</dd></div>{translation?.metadata ? <div><dt>Translation model</dt><dd>{translation.metadata.model}</dd></div> : null}</dl></details>
+          </article>;
+        })}
+        {newTranscriptAvailable ? <button className="new-transcript-indicator" onClick={() => { transcriptFeedRef.current?.scrollIntoView({ behavior: "smooth", block: "end" }); autoScrollRef.current = true; setNewTranscriptAvailable(false); }} type="button">New transcript available · jump to latest</button> : null}
+      </section> : null}
+
+      {false && usesLiveTranscriptState && semanticSegments.length > 0 ? <section className="live-segments"><h2>Semantic segments</h2>{semanticSegments.map((segment) => {
         const correction = finalCorrections[segment.segmentId];
         const translation = translations[segment.segmentId];
         const quality = translationQuality[segment.segmentId];
@@ -1295,7 +1367,7 @@ export default function LivePage() {
         return <article className="segment-row" key={segment.segmentId}><span>{(segment.startMs / 1000).toFixed(2)}s to {(segment.endMs / 1000).toFixed(2)}s · {segment.state} · r{segment.revision}{correction ? ` · accurate final: ${correction.status}` : ""}</span><p>{segment.text}</p>{diarization ? <div className="speaker-assignment"><small>Speaker diarization · {diarization.status}{diarization.assignment ? ` · confidence ${diarization.assignment.confidence.toFixed(3)}` : ""}</small>{diarization.assignment ? <p><strong>{diarization.assignment.speakerLabel}</strong> <button className="secondary" type="button" onClick={() => void renameSpeaker(diarization.assignment!.speakerId, diarization.assignment!.speakerLabel)}>Rename</button></p> : diarization.status === "failed" ? <small>{diarization.error ?? "Diarization failed"}; segment remains unassigned.</small> : null}</div> : null}{segment.rawText && segment.rawText !== segment.text ? <small>Raw model output: {segment.rawText}</small> : null}{segment.glossaryCorrections?.length ? <small>Glossary: {segment.glossaryCorrections.map((item) => `${item.source} → ${item.replacement}`).join(", ")}</small> : null}{correction?.status === "failed" ? <small>{correction.error ?? "Accurate final failed; live result retained."}</small> : null}{correction?.status === "completed" && correction.metadata ? <small>{correction.metadata.model} · {correction.metadata.device}/{correction.metadata.computeType} · beam {correction.metadata.beamSize}</small> : null}{translation ? <div className="translation-result"><small>Local translation · {translation.status} · r{translation.revision}{quality ? ` · quality: ${quality.status}` : ""}</small>{displayedTranslation ? <p>{displayedTranslation}</p> : null}{quality?.status === "completed" && quality.rawTranslation !== quality.correctedTranslation ? <small>Raw final translation: {quality.rawTranslation}</small> : null}{quality?.appliedCorrections?.length ? <small>Quality corrections: {quality.appliedCorrections.map((item) => item.rule).join(", ")}</small> : null}{quality?.fallback ? <small>{quality.error ?? "Quality pass failed"}; raw final translation retained.</small> : null}{translation.error ? <small>{translation.error}; source transcript retained.</small> : null}{translation.metadata ? <small>{translation.metadata.sourceLanguage}→{translation.metadata.targetLanguage} · {translation.metadata.model} · {translation.metadata.device}/{translation.metadata.computeType}</small> : null}</div> : null}</article>;
       })}</section> : null}
 
-      {usesTranscriptPostprocess && Object.keys(transcriptPostprocess).length > 0 ? <section className="live-segments"><h2>Final transcript post-processing</h2>{Object.values(transcriptPostprocess).sort((left, right) => left.sequenceStart - right.sequenceStart).map((result) => <article className="segment-row" key={result.segmentId}><span>{(result.startMs / 1000).toFixed(2)}s to {(result.endMs / 1000).toFixed(2)}s · {result.sourceKind} · {result.status} · source r{result.sourceRevision}</span><p>{result.postProcessedTranscript}</p><small>Raw transcript: {result.rawTranscript}</small><small>Glossary-corrected transcript: {result.glossaryCorrectedTranscript}</small>{result.appliedCorrections?.length ? <small>Post-processing corrections: {result.appliedCorrections.map((item) => item.rule).join(", ")}</small> : null}{result.fallback ? <small>{result.error ?? "Post-processing failed"}; glossary-corrected transcript retained.</small> : null}</article>)}</section> : null}
+      {false && usesTranscriptPostprocess && Object.keys(transcriptPostprocess).length > 0 ? <section className="live-segments"><h2>Final transcript post-processing</h2>{Object.values(transcriptPostprocess).sort((left, right) => left.sequenceStart - right.sequenceStart).map((result) => <article className="segment-row" key={result.segmentId}><span>{(result.startMs / 1000).toFixed(2)}s to {(result.endMs / 1000).toFixed(2)}s · {result.sourceKind} · {result.status} · source r{result.sourceRevision}</span><p>{result.postProcessedTranscript}</p><small>Raw transcript: {result.rawTranscript}</small><small>Glossary-corrected transcript: {result.glossaryCorrectedTranscript}</small>{result.appliedCorrections?.length ? <small>Post-processing corrections: {result.appliedCorrections.map((item) => item.rule).join(", ")}</small> : null}{result.fallback ? <small>{result.error ?? "Post-processing failed"}; glossary-corrected transcript retained.</small> : null}</article>)}</section> : null}
 
       {!usesLiveTranscriptState && segments.length > 0 ? <section className="live-segments"><h2>Segments</h2>{segments.map((segment, index) => <article className="segment-row" key={segment.id ?? `${segment.start}-${index}`}><span>{segment.start.toFixed(2)}s → {segment.end.toFixed(2)}s</span><p>{segment.text}</p></article>)}</section> : null}
     </section>

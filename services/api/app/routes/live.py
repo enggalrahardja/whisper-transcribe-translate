@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import platform
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Query, WebSocket, WebSocketDisconnect, status
 from pydantic import BaseModel, Field
@@ -69,6 +70,7 @@ from ..services.pipeline_persistence import (
     MongoPipelineRepository,
     PipelinePersistenceService,
 )
+from ..services.pipeline_monitoring import latency_summary, quality_indicators, redact_metrics, resource_metrics, warnings_for
 from ..services.live_sessions import (
     create_live_session,
     fail_live_session,
@@ -1181,6 +1183,34 @@ def processing_worker_health() -> dict[str, object]:
         "transcript_postprocessing": _specialized_worker_health("transcript_postprocessing", _transcript_postprocess_queue, _runtime_settings.live_transcript_postprocess_enabled),
     }
     return {"ready": all(bool(worker["ready"]) for worker in workers.values()), "workers": workers}
+
+
+@router.get("/api/live/monitoring")
+def live_monitoring(session_id: str | None = Query(default=None)) -> dict[str, object]:
+    health = processing_worker_health()
+    sessions = list_live_sessions(100)
+    persistence = _persistence_service.metrics() if _persistence_service is not None else {}
+    session_metrics: dict[str, object] | None = None
+    if session_id:
+        pcm = _pcm_registry.metrics(session_id)
+        transcript = _live_state_registry.metrics(session_id)
+        session_metrics = {
+            "audioDurationReceivedSeconds": pcm.get("audio_duration_received_seconds", 0),
+            "chunksAcknowledged": pcm.get("chunks_acknowledged", 0), "chunksLost": pcm.get("chunks_lost", 0),
+            "duplicateChunks": pcm.get("duplicate_chunks", 0), "outOfOrderChunks": pcm.get("out_of_order_chunks", 0),
+            "segmentCount": len(_live_state_registry.snapshot(session_id)),
+            "latency": latency_summary([transcript.get("partial_latency_ms",0), transcript.get("stable_latency_ms",0), transcript.get("final_latency_ms",0)]),
+            "detectedSpeakers": _diarization_queue.state.clusterer.speaker_count(session_id) if _diarization_queue else 0,
+        }
+        session_metrics["quality"] = quality_indicators({"segmentCount":session_metrics["segmentCount"],"chunksLost":session_metrics["chunksLost"],"chunksSent":pcm.get("chunks_received",0),"audioSeconds":session_metrics["audioDurationReceivedSeconds"]})
+    response = {
+        "generatedAt": datetime.now(timezone.utc).isoformat(),
+        "system": {"activeSessions": sum(item.status in {"active","paused"} for item in sessions), "totalSessions": len(sessions), "connectedClients": len(_connections), "workerReadiness": health["ready"], "resources": resource_metrics(), "degradedPersistenceSessions": persistence.get("degraded_sessions",0)},
+        "workers": health["workers"], "persistence": persistence,
+        "warnings": warnings_for(health["workers"], persistence_degraded=int(persistence.get("degraded_sessions",0))),
+        "session": session_metrics,
+    }
+    return redact_metrics(response)
 
 
 @router.post("/api/live/glossary/reload")

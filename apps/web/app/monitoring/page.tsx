@@ -1,0 +1,18 @@
+"use client";
+import { useCallback, useEffect, useState } from "react";
+import { apiBaseUrl } from "../lib/api";
+
+type Snapshot = { generatedAt:string; system:Record<string,any>; workers:Record<string,Record<string,any>>; persistence:Record<string,any>; warnings:Array<{code:string;worker:string}> };
+export default function MonitoringPage() {
+  const [snapshot,setSnapshot]=useState<Snapshot|null>(null), [error,setError]=useState(""), [loading,setLoading]=useState(true), [intervalSeconds,setIntervalSeconds]=useState(10);
+  const refresh=useCallback(async()=>{ if(document.visibilityState!=="visible") return; try { const response=await fetch(`${apiBaseUrl}/api/live/monitoring`,{cache:"no-store"}); if(!response.ok) throw new Error("Monitoring unavailable"); setSnapshot(await response.json()); setError(""); } catch(e){setError(e instanceof Error?e.message:"Monitoring unavailable");} finally{setLoading(false);} },[]);
+  useEffect(()=>{void refresh(); const timer=window.setInterval(()=>void refresh(),intervalSeconds*1000); const visible=()=>{if(document.visibilityState==="visible") void refresh();}; document.addEventListener("visibilitychange",visible); return()=>{window.clearInterval(timer);document.removeEventListener("visibilitychange",visible);};},[refresh,intervalSeconds]);
+  return <main className="page-shell"><header><h1>Pipeline monitoring</h1><p>Content-free operational health and runtime metrics.</p><label>Auto-refresh<select value={intervalSeconds} onChange={e=>setIntervalSeconds(Number(e.target.value))}><option value={5}>5 seconds</option><option value={10}>10 seconds</option><option value={30}>30 seconds</option><option value={60}>60 seconds</option></select></label></header>
+    {loading?<p role="status">Loading monitoring data…</p>:error?<p className="error-callout" role="alert">{error}</p>:!snapshot?<p>No monitoring data available.</p>:<>
+      <section className="live-status-grid" aria-label="Health summary"><div><span>Active / total sessions</span><strong>{snapshot.system.activeSessions} / {snapshot.system.totalSessions}</strong></div><div><span>Connected clients</span><strong>{snapshot.system.connectedClients}</strong></div><div><span>Worker readiness</span><strong>{snapshot.system.workerReadiness?"Ready":"Degraded"}</strong></div><div><span>CPU / RAM</span><strong>{snapshot.system.resources.cpuPercent}% / {snapshot.system.resources.ramPercent}%</strong></div><div><span>GPU / VRAM</span><strong>{snapshot.system.resources.gpuUtilizationPercent??"N/A"} / {snapshot.system.resources.vramUsedMb??"N/A"}</strong></div></section>
+      {snapshot.warnings.length?<section><h2>Warnings</h2><ul>{snapshot.warnings.map((item,index)=><li key={`${item.code}-${item.worker}-${index}`}>{item.code} · {item.worker}</li>)}</ul></section>:null}
+      <section><h2>Workers</h2><div className="table-scroll"><table><thead><tr><th>Worker</th><th>Status</th><th>Queue</th><th>Active</th><th>Completed</th><th>Failed</th><th>Retries</th><th>p50/p95/p99 latency</th><th>Model</th></tr></thead><tbody>{Object.entries(snapshot.workers).map(([name,w])=><tr key={name}><td>{name}</td><td>{w.ready?"Ready":"Unavailable"}</td><td>{w.queueDepth}/{w.capacity}</td><td>{w.activeJobs}</td><td>{w.completed??0}</td><td>{w.failed??0}</td><td>{w.retried??0}</td><td>{w.p50Ms??"—"}/{w.p95Ms??"—"}/{w.p99Ms??"—"}</td><td>{w.modelLoaded?`Loaded (${w.modelLoadTimeMs??0}ms)`:"Lazy/not loaded"}</td></tr>)}</tbody></table></div></section>
+      <p><small>Updated {new Date(snapshot.generatedAt).toLocaleString()} · No transcript or audio content is exposed.</small></p>
+    </>}
+  </main>;
+}

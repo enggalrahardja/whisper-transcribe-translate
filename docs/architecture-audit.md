@@ -334,3 +334,13 @@ and degraded-persistence states are explicit. Desktop uses paired source and
 translation columns; mobile stacks them without adding nested scrolling.
 Legacy rendering and all default-off flags remain unchanged. See
 `docs/stage13-live-transcription-ui.md`.
+
+## Stage 14 addendum
+
+Stage 14 adds a read-only, content-free aggregation layer and separate
+monitoring page. It combines existing runtime/persisted counters, worker health,
+resource utilization, percentile latency, quality ratios, and configurable
+warning thresholds without affecting processing outputs. Polling pauses while
+the browser tab is hidden. Runtime metrics remain non-durable and the contract
+is shaped for a later Prometheus/OpenTelemetry exporter. See
+`docs/stage14-quality-monitoring.md`.

@@ -399,7 +399,13 @@ class TranscriptionWorker:
             },
         )
 
-    def save_transcript(self, job: dict, result: dict, translated_text: str | None = None) -> ObjectId:
+    def save_transcript(
+        self,
+        job: dict,
+        result: dict,
+        translated_text: str | None = None,
+        processing_metadata: dict[str, object] | None = None,
+    ) -> ObjectId:
         now = utc_now()
         original_text = str(result.get("text", "")).strip()
         source_language = str(result.get("language") or job.get("language") or "unknown")
@@ -411,6 +417,8 @@ class TranscriptionWorker:
             "text": translated_text if is_translation else original_text,
             "language": source_language,
             "segments": original_segments,
+            "paragraphs": result.get("paragraphs", []),
+            "processing_metadata": processing_metadata,
             "original_text": original_text,
             "translated_text": translated_text if is_translation else None,
             "source_language": source_language,
@@ -424,6 +432,11 @@ class TranscriptionWorker:
             {"$setOnInsert": document},
             upsert=True,
         )
+        if processing_metadata is not None:
+            self.jobs.update_one(
+                {"_id": job["_id"]},
+                {"$set": {"processing_observability": processing_metadata, "updated_at": now}},
+            )
         transcript = self.transcripts.find_one({"job_id": job["_id"]}, {"_id": 1})
         if transcript is None:
             raise RuntimeError("Transcript could not be saved")
@@ -516,6 +529,41 @@ class TranscriptionWorker:
                 no_speech_threshold=job_inference.no_speech_threshold,
             )
             result = apply_job_output_config(result, job)
+            processing_stats = result.get("_processing_stats", {})
+            processing_metadata = {
+                "effective_config": job.get("transcription_config"),
+                "raw_segment_count": int(processing_stats.get("raw_segment_count", len(result.get("segments", [])))),
+                "final_segment_count": int(processing_stats.get("final_segment_count", len(result.get("segments", [])))),
+                "paragraph_count": int(processing_stats.get("paragraph_count", len(result.get("paragraphs", [])))),
+                "diarization_status": str(processing_stats.get("diarization_status", "disabled")),
+                "glossary_corrections_count": int(processing_stats.get("glossary_corrections_count", 0)),
+                "preprocessing": {
+                    "processing_mode": job.get("transcription_config", {}).get("processing_mode", "legacy") if isinstance(job.get("transcription_config"), dict) else "legacy",
+                    "use_vad": job.get("transcription_config", {}).get("use_vad") if isinstance(job.get("transcription_config"), dict) else None,
+                    "vad": job.get("transcription_config", {}).get("vad") if isinstance(job.get("transcription_config"), dict) else None,
+                    "no_speech_threshold": job_inference.no_speech_threshold,
+                    "paragraph_grouping": {
+                        "pause_threshold_seconds": min(1.2, max(0.8, float(job.get("transcription_config", {}).get("vad", {}).get("minimum_silence_ms", 800)) / 1000)) if isinstance(job.get("transcription_config"), dict) else None,
+                        "maximum_characters": 600,
+                        "maximum_segments": 24,
+                    },
+                },
+                "decoding": {
+                    "model": model_name,
+                    "language": job_inference.language,
+                    "beam_size": job_inference.beam_size,
+                    "best_of": job_inference.best_of,
+                    "temperature": job_inference.temperature,
+                    "word_timestamps": job_inference.word_timestamps,
+                    "segments_with_word_timestamps": sum(
+                        1 for segment in result.get("segments", [])
+                        if isinstance(segment.get("words"), list) and segment.get("words")
+                    ),
+                    "condition_on_previous_text": job_inference.condition_on_previous_text,
+                    "initial_prompt_applied": bool(job_inference.initial_prompt),
+                    "model_load": self.adapter.last_load_metadata,
+                },
+            }
             original_text = str(result.get("text", "")).strip()
             if is_translation and not original_text:
                 raise ValueError("Transcription is empty; there is no text to save or translate")
@@ -534,7 +582,12 @@ class TranscriptionWorker:
             if self.should_cancel_current_job() or not self.update_progress(job_id, 90, "saving_result", "Saving transcript"):
                 self.cancel_current_job()
                 return
-            transcript_id = self.save_transcript(job, result, translated_text=translated_text)
+            transcript_id = self.save_transcript(
+                job,
+                result,
+                translated_text=translated_text,
+                processing_metadata=processing_metadata,
+            )
             if self.complete_job(job, transcript_id):
                 logger.info("Completed job %s with transcript %s", job_id, transcript_id)
             elif self.cancel_current_job():

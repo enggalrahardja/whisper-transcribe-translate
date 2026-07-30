@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from math import exp
 from dataclasses import dataclass
 
 from ..models.job import AdvancedTranscriptionSettings
@@ -64,64 +65,144 @@ def apply_job_output_config(result: dict, job: dict) -> dict:
     if config is None:
         return result
 
-    if (
-        config.processing_mode == "standard"
-        and not config.apply_glossary
-        and config.transcript_style == "verbatim"
-        and config.low_confidence_handling == "keep"
-    ):
-        return result
-
+    raw_segment_count = len(result.get("segments", []))
     segments = [dict(item) for item in result.get("segments", [])]
     if config.processing_mode == "lecture":
         segments = _merge_lecture_segments(segments, config.vad.maximum_segment_duration_seconds)
     glossary = load_job_glossary(config.glossary_id) if config.apply_glossary and config.glossary_id else None
     clean = config.processing_mode == "clean" or config.transcript_style == "clean"
 
+    glossary_corrections_count = 0
     for segment in segments:
         text = str(segment.get("text", ""))
         if glossary is not None:
-            text = glossary.correct(text, language=str(result.get("language") or "auto")).corrected_text
+            correction = glossary.correct(text, language=str(result.get("language") or "auto"))
+            text = correction.corrected_text
+            glossary_corrections_count += len(correction.corrections)
         if float(segment.get("avg_logprob", 0)) < -1:
             if config.low_confidence_handling == "mark":
                 text = f"[low confidence] {text.strip()}"
             elif config.low_confidence_handling == "replace":
                 text = "[tidak jelas]"
-        if clean:
-            text = _clean_transcript(text)
-        elif config.transcript_style == "verbatim_normalized":
-            text = _normalize_whitespace(text)
-        segment["text"] = text
+        segment["text"] = _reduce_fillers(text) if clean else _normalize_whitespace(text)
 
-    text = _join_segments(segments, config)
+    segments, paragraphs = group_transcript_segments(segments, config)
+    text = "\n\n".join(str(paragraph["text"]) for paragraph in paragraphs)
     if not segments:
         text = str(result.get("text", ""))
         if glossary is not None:
             text = glossary.correct(text, language=str(result.get("language") or "auto")).corrected_text
         if clean:
-            text = _clean_transcript(text)
+            text = _format_normalized(_reduce_fillers(text))
         elif config.transcript_style == "verbatim_normalized":
-            text = _normalize_whitespace(text)
+            text = _format_normalized(text)
 
-    return {**result, "text": text.strip(), "segments": segments}
+    diarization_status = _diarization_status(result, config, segments)
+    return {
+        **result,
+        "text": text.strip(),
+        "segments": segments,
+        "paragraphs": paragraphs,
+        "_processing_stats": {
+            "raw_segment_count": raw_segment_count,
+            "final_segment_count": len(segments),
+            "paragraph_count": len(paragraphs),
+            "diarization_status": diarization_status,
+            "glossary_corrections_count": glossary_corrections_count,
+        },
+    }
 
 
-def _join_segments(segments: list[dict], config: AdvancedTranscriptionSettings) -> str:
-    chunks: list[str] = []
-    previous_end: float | None = None
-    pause_threshold = config.vad.minimum_silence_ms / 1000
-    paragraph_by_pause = config.processing_mode in {"interview", "clean"}
-    for segment in segments:
-        text = str(segment.get("text", "")).strip()
-        if not text:
-            continue
-        start = float(segment.get("start", previous_end or 0))
-        separator = "\n\n" if paragraph_by_pause and previous_end is not None and start - previous_end >= pause_threshold else " "
-        if chunks:
-            chunks.append(separator)
-        chunks.append(text)
-        previous_end = float(segment.get("end", start))
-    return "".join(chunks)
+def group_transcript_segments(
+    segments: list[dict],
+    config: AdvancedTranscriptionSettings,
+    *,
+    maximum_paragraph_characters: int = 600,
+    maximum_paragraph_segments: int = 24,
+) -> tuple[list[dict], list[dict]]:
+    """Order final segments and create bounded paragraphs without rewriting meaning."""
+    ordered = sorted(
+        (dict(segment) for segment in segments),
+        key=lambda segment: (float(segment.get("start", 0)), float(segment.get("end", 0))),
+    )
+    pause_threshold = min(1.2, max(0.8, config.vad.minimum_silence_ms / 1000))
+    groups: list[list[dict]] = []
+    current: list[dict] = []
+    current_characters = 0
+
+    for index, segment in enumerate(ordered):
+        segment["id"] = segment.get("id", index)
+        segment["start"] = float(segment.get("start", 0))
+        segment["end"] = max(segment["start"], float(segment.get("end", segment["start"])))
+        segment["text"] = _normalize_whitespace(str(segment.get("text", "")))
+        segment["confidence"] = _segment_confidence(segment)
+        speaker_id = segment.get("speaker_id") or segment.get("speakerId")
+        segment["speaker_id"] = str(speaker_id) if speaker_id else None
+
+        previous = current[-1] if current else None
+        pause = segment["start"] - float(previous.get("end", segment["start"])) if previous else 0
+        speaker_changed = bool(
+            previous
+            and previous.get("speaker_id")
+            and segment.get("speaker_id")
+            and previous["speaker_id"] != segment["speaker_id"]
+        )
+        too_long = bool(
+            current
+            and (
+                current_characters + len(segment["text"]) + 1 > maximum_paragraph_characters
+                or len(current) >= maximum_paragraph_segments
+            )
+        )
+        pause_break = bool(current and config.processing_mode in {"interview", "clean"} and pause >= pause_threshold)
+        if current and (pause_break or speaker_changed or too_long):
+            groups.append(current)
+            current = []
+            current_characters = 0
+        current.append(segment)
+        current_characters += len(segment["text"]) + 1
+    if current:
+        groups.append(current)
+
+    paragraphs: list[dict] = []
+    for index, group in enumerate(groups, start=1):
+        paragraph_id = f"p-{index:04d}"
+        for segment in group:
+            segment["paragraph_id"] = paragraph_id
+        speaker_ids = {str(segment["speaker_id"]) for segment in group if segment.get("speaker_id")}
+        paragraph_text = " ".join(segment["text"] for segment in group if segment["text"])
+        if config.transcript_style == "verbatim_normalized" or config.processing_mode == "clean" or config.transcript_style == "clean":
+            paragraph_text = _format_normalized(paragraph_text)
+        else:
+            paragraph_text = _format_verbatim_punctuation(paragraph_text)
+        paragraphs.append({
+            "id": paragraph_id,
+            "start": group[0]["start"],
+            "end": group[-1]["end"],
+            "text": paragraph_text,
+            "speaker_id": next(iter(speaker_ids)) if len(speaker_ids) == 1 else None,
+            "segment_ids": [segment["id"] for segment in group],
+        })
+    return ordered, paragraphs
+
+
+def _segment_confidence(segment: dict) -> float | None:
+    confidence = segment.get("confidence")
+    if isinstance(confidence, (int, float)):
+        return round(max(0.0, min(1.0, float(confidence))), 6)
+    average_log_probability = segment.get("avg_logprob")
+    if not isinstance(average_log_probability, (int, float)):
+        return None
+    return round(max(0.0, min(1.0, exp(float(average_log_probability)))), 6)
+
+
+def _diarization_status(result: dict, config: AdvancedTranscriptionSettings, segments: list[dict]) -> str:
+    if not config.speaker_diarization:
+        return "disabled"
+    reported = result.get("diarization_status")
+    if reported in {"completed", "failed", "unavailable"}:
+        return str(reported)
+    return "completed" if any(segment.get("speaker_id") for segment in segments) else "unavailable"
 
 
 def _merge_lecture_segments(segments: list[dict], maximum_duration: float) -> list[dict]:
@@ -149,7 +230,7 @@ def _normalize_whitespace(text: str) -> str:
     return re.sub(r"\s+", " ", text, flags=re.UNICODE).strip()
 
 
-def _clean_transcript(text: str) -> str:
+def _reduce_fillers(text: str) -> str:
     # This is deliberately deterministic: no summarization, paraphrasing, or semantic rewrite.
     value = re.sub(
         r"(?<![\w])(?:uh|um|erm|hmm|eh|anu|eee|mmm)(?![\w])(?:\s*[,;]\s*)?",
@@ -157,8 +238,23 @@ def _clean_transcript(text: str) -> str:
         text,
         flags=re.IGNORECASE,
     )
-    value = _normalize_whitespace(value)
-    value = re.sub(r"\s+([,.;:!?])", r"\1", value)
+    return _normalize_whitespace(value)
+
+
+def _format_normalized(text: str) -> str:
+    value = _format_verbatim_punctuation(text)
+    value = re.sub(
+        r"(^|[.!?]\s+)([a-zà-öø-ÿ])",
+        lambda match: match.group(1) + match.group(2).upper(),
+        value,
+    )
     if value and value[-1] not in ".!?)]}\"'":
         value += "."
+    return value
+
+
+def _format_verbatim_punctuation(text: str) -> str:
+    value = _normalize_whitespace(text)
+    value = re.sub(r"\s+([,.;:!?])", r"\1", value)
+    value = re.sub(r"([,;:!?])(?=[^\s,.;:!?])", r"\1 ", value)
     return value

@@ -194,6 +194,14 @@ header p, .service-card p, .jobs-panel p { color: #687086; }
 .transcript-heading button { flex: none; padding: 10px 14px; border: 0; border-radius: 10px; color: #fff; background: #5b55d9; font-weight: 700; cursor: pointer; }
 .transcript-heading button:disabled { cursor: wait; opacity: .55; }
 .transcript-text { padding: 20px; border: 1px solid #e4e7ef; border-radius: 14px; background: #fafbfe; white-space: pre-wrap; line-height: 1.75; }
+.transcript-paragraph-list { display: grid; gap: 14px; }
+.transcript-paragraph { padding: 18px 20px; border: 1px solid #e4e7ef; border-radius: 14px; background: #fafbfe; }
+.transcript-paragraph > div { display: flex; justify-content: space-between; gap: 14px; margin-bottom: 9px; color: #665df1; font-size: 12px; font-weight: 800; }
+.transcript-paragraph p { margin: 0; color: #3f475d; line-height: 1.75; }
+.transcript-observability { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 22px 0; }
+.transcript-observability > div { padding: 12px; border: 1px solid #e8eaf1; border-radius: 10px; }
+.transcript-observability dt { margin-bottom: 5px; color: #737b91; font-size: 10px; font-weight: 800; text-transform: uppercase; }
+.transcript-observability dd { margin: 0; font-weight: 700; }
 .translation-results { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
 .translation-panel { min-width: 0; }
 .translation-panel h3 { margin-bottom: 12px; }
@@ -207,6 +215,7 @@ header p, .service-card p, .jobs-panel p { color: #687086; }
 .segment-row { display: grid; grid-template-columns: 190px minmax(0, 1fr); gap: 18px; padding: 14px 16px; border: 1px solid #e8eaf1; border-radius: 12px; }
 .segment-row > span { color: #665df1; font-size: 12px; font-weight: 800; }
 .segment-row p { margin: 0; color: #3f475d; line-height: 1.55; }
+.segment-row small { display: block; margin-top: 5px; color: #737b91; }
 .empty-segments { margin: 0; padding: 18px; border-radius: 12px; color: #737b91; background: #f5f6fa; text-align: center; }
 
 .history-page { min-width: 0; }
@@ -427,7 +436,7 @@ header p, .service-card p, .jobs-panel p { color: #687086; }
   .placeholder-card { padding: 28px 22px; }
   .job-detail-card, .transcript-card { padding: 22px; }
   .job-title-row, .transcript-heading { flex-direction: column; }
-  .segment-row { grid-template-columns: 1fr; gap: 8px; }
+  .segment-row, .transcript-observability { grid-template-columns: 1fr; gap: 8px; }
   .history-card { padding: 18px; }
   .history-filters { grid-template-columns: 1fr; }
   .history-pagination { align-items: flex-start; flex-direction: column; }

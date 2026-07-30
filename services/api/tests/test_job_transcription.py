@@ -76,6 +76,60 @@ class JobTranscriptionSettingsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             AdvancedTranscriptionSettings(apply_glossary=True)
 
+    def test_interview_725_segments_create_multiple_ordered_paragraphs(self):
+        segments = [
+            {"id": index, "start": index * 2, "end": index * 2 + 2, "text": f" bagian {index}", "avg_logprob": -0.2}
+            for index in range(725)
+        ]
+        output = apply_job_output_config(
+            {"text": "legacy combined", "language": "id", "segments": segments},
+            {"transcription_config": {"processing_mode": "interview", "transcript_style": "verbatim"}},
+        )
+        self.assertEqual(len(output["segments"]), 725)
+        self.assertGreater(len(output["paragraphs"]), 1)
+        self.assertEqual(output["segments"][0]["paragraph_id"], "p-0001")
+        self.assertIn("\n\n", output["text"])
+        self.assertEqual(output["_processing_stats"]["raw_segment_count"], 725)
+
+    def test_interview_pause_and_speaker_change_create_breaks(self):
+        segments = [
+            {"id": 1, "start": 0, "end": 1, "text": " satu", "speaker_id": "speaker-1"},
+            {"id": 2, "start": 1.1, "end": 2, "text": " dua", "speaker_id": "speaker-2"},
+            {"id": 3, "start": 3, "end": 4, "text": " tiga", "speaker_id": "speaker-2"},
+        ]
+        output = apply_job_output_config(
+            {"text": "", "segments": segments},
+            {"transcription_config": {"processing_mode": "interview", "vad": {"minimum_silence_ms": 800}}},
+        )
+        self.assertEqual(len(output["paragraphs"]), 3)
+
+    def test_verbatim_keeps_fillers_but_still_formats_paragraphs(self):
+        output = apply_job_output_config(
+            {"text": "", "segments": [
+                {"start": 0, "end": 1, "text": " um kata asli"},
+                {"start": 2, "end": 3, "text": " tetap ada"},
+            ]},
+            {"transcription_config": {"processing_mode": "interview", "transcript_style": "verbatim"}},
+        )
+        self.assertEqual(len(output["paragraphs"]), 2)
+        self.assertIn("um kata asli", output["text"])
+
+    def test_verbatim_normalized_capitalizes_and_punctuates_without_summarizing(self):
+        output = apply_job_output_config(
+            {"text": "", "segments": [{"start": 0, "end": 1, "text": " semua isi substantif tetap ada"}]},
+            {"transcription_config": {"transcript_style": "verbatim_normalized"}},
+        )
+        self.assertEqual(output["text"], "Semua isi substantif tetap ada.")
+
+    def test_unavailable_diarization_has_no_fake_speaker_labels(self):
+        output = apply_job_output_config(
+            {"text": "", "segments": [{"start": 0, "end": 1, "text": " percakapan"}]},
+            {"transcription_config": {"speaker_diarization": True, "processing_mode": "interview"}},
+        )
+        self.assertEqual(output["_processing_stats"]["diarization_status"], "unavailable")
+        self.assertIsNone(output["segments"][0]["speaker_id"])
+        self.assertTrue(output["text"])
+
 
 if __name__ == "__main__":
     unittest.main()

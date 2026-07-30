@@ -24,6 +24,8 @@ def _serialize_transcript(document: dict) -> TranscriptResponse:
         text=document["text"],
         language=document["language"],
         segments=document.get("segments", []),
+        paragraphs=document.get("paragraphs", []),
+        processing_metadata=document.get("processing_metadata"),
         original_text=document.get("original_text", document.get("text", "")),
         translated_text=document.get("translated_text"),
         source_language=document.get("source_language", document.get("language")),

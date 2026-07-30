@@ -78,6 +78,7 @@ export type Job = {
     vram_free_bytes_before_load: number | null;
     vram_total_bytes_before_load: number | null;
   } | null;
+  processing_observability: TranscriptProcessingMetadata | null;
   cancellation_requested: boolean;
   worker_id: string | null;
   transcript_id: string | null;
@@ -93,6 +94,29 @@ export type TranscriptSegment = {
   start: number;
   end: number;
   text: string;
+  confidence?: number | null;
+  speaker_id?: string | null;
+  paragraph_id?: string;
+};
+
+export type TranscriptParagraph = {
+  id: string;
+  start: number;
+  end: number;
+  text: string;
+  speaker_id: string | null;
+  segment_ids: Array<number | string>;
+};
+
+export type TranscriptProcessingMetadata = {
+  effective_config: AdvancedTranscriptionSettings | null;
+  raw_segment_count: number;
+  final_segment_count: number;
+  paragraph_count: number;
+  diarization_status: "disabled" | "completed" | "failed" | "unavailable";
+  glossary_corrections_count: number;
+  preprocessing: Record<string, unknown>;
+  decoding: Record<string, unknown>;
 };
 
 export type Transcript = {
@@ -102,6 +126,8 @@ export type Transcript = {
   text: string;
   language: string;
   segments: TranscriptSegment[];
+  paragraphs: TranscriptParagraph[];
+  processing_metadata: TranscriptProcessingMetadata | null;
   original_text: string | null;
   translated_text: string | null;
   source_language: string | null;

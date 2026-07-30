@@ -81,6 +81,7 @@ class JobResponse(BaseModel):
     content_type: str | None = None
     error: str | None = None
     model_load_metadata: dict[str, object] | None = None
+    processing_observability: dict[str, object] | None = None
     cancellation_requested: bool = False
     worker_id: str | None = None
     transcript_id: str | None = None
@@ -98,6 +99,8 @@ class TranscriptResponse(BaseModel):
     text: str
     language: str
     segments: list[dict]
+    paragraphs: list[dict] = Field(default_factory=list)
+    processing_metadata: dict[str, object] | None = None
     original_text: str | None = None
     translated_text: str | None = None
     source_language: str | None = None

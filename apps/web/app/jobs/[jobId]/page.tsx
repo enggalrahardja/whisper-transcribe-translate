@@ -5,6 +5,7 @@ import { useParams } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { apiBaseUrl, formatBytes, Job, Transcript } from "../../lib/api";
 import { languageLabel } from "../../lib/languages";
+import { paragraphsForDisplay } from "../../../lib/transcript-view-model.mjs";
 
 const pollingIntervalMs = 1500;
 const activeStatuses = new Set(["queued", "processing"]);
@@ -122,6 +123,15 @@ export default function JobDetailPage() {
     return transcript.translated_segments.filter((segment) => segment.text.toLocaleLowerCase().includes(normalizedSearch));
   }, [translatedSearch, transcript]);
 
+  const originalParagraphs = useMemo(() => paragraphsForDisplay(transcript, {
+    processingMode: job?.transcription_config?.processing_mode,
+    minimumSilenceMs: job?.transcription_config?.vad.minimum_silence_ms,
+  }), [job?.transcription_config, transcript]);
+  const filteredOriginalParagraphs = useMemo(() => {
+    const search = originalSearch.trim().toLocaleLowerCase();
+    return search ? originalParagraphs.filter((paragraph) => paragraph.text.toLocaleLowerCase().includes(search)) : originalParagraphs;
+  }, [originalParagraphs, originalSearch]);
+
   async function copyTranscript(text: string, kind: "original" | "translated") {
     try {
       await navigator.clipboard.writeText(text);
@@ -151,7 +161,6 @@ export default function JobDetailPage() {
   const backHref = isTranslation ? "/translate" : "/transcribe";
   const originalText = transcript?.original_text ?? transcript?.text ?? "";
   const translatedText = transcript?.translated_text ?? (isTranslation ? transcript?.text ?? "" : "");
-  const originalMatches = !originalSearch.trim() || originalText.toLocaleLowerCase().includes(originalSearch.trim().toLocaleLowerCase());
   const translatedMatches = !translatedSearch.trim() || translatedText.toLocaleLowerCase().includes(translatedSearch.trim().toLocaleLowerCase());
   const stateMessage = job.status === "queued"
     ? "Waiting for worker"
@@ -191,7 +200,7 @@ export default function JobDetailPage() {
             <div><dt>Previous context</dt><dd>{job.transcription_config.use_previous_segment_context ? "On" : "Off"}</dd></div>
             <div><dt>Glossary</dt><dd>{job.transcription_config.apply_glossary ? job.transcription_config.glossary_id : "Off"}</dd></div>
             <div><dt>Accurate final</dt><dd>{job.transcription_config.accurate_final ? "On" : "Off"}</dd></div>
-            <div><dt>Diarization</dt><dd>{job.transcription_config.speaker_diarization ? "Requested (if available)" : "Off"}</dd></div>
+            <div><dt>Diarization</dt><dd>{job.processing_observability?.diarization_status ?? (job.transcription_config.speaker_diarization ? "unavailable" : "disabled")}</dd></div>
             <div><dt>Style</dt><dd>{job.transcription_config.transcript_style.replaceAll("_", " ")}</dd></div>
             <div><dt>Low confidence</dt><dd>{job.transcription_config.low_confidence_handling}</dd></div>
           </dl>
@@ -264,7 +273,14 @@ export default function JobDetailPage() {
                       Search original
                       <input onChange={(event) => setOriginalSearch(event.target.value)} placeholder="Search original transcript" type="search" value={originalSearch} />
                     </label>
-                    <div className="transcript-text">{originalMatches ? originalText : "No match in original transcript."}</div>
+                    <div className="transcript-paragraph-list">
+                      {filteredOriginalParagraphs.length > 0 ? filteredOriginalParagraphs.map((paragraph) => (
+                        <article className="transcript-paragraph" key={paragraph.id}>
+                          <div><span>{formatTimestamp(paragraph.start)} → {formatTimestamp(paragraph.end)}</span>{paragraph.speaker_id ? <strong>{paragraph.speaker_id}</strong> : null}</div>
+                          <p>{paragraph.text}</p>
+                        </article>
+                      )) : <p className="empty-segments">No matching original transcript paragraphs.</p>}
+                    </div>
                   </section>
                   <section className="translation-panel">
                     <div className="transcript-heading">
@@ -282,13 +298,27 @@ export default function JobDetailPage() {
                 </div>
               ) : (
                 <>
-                  <div className="transcript-text">{originalText}</div>
                   <label className="transcript-search">
                     Search transcript
                     <input onChange={(event) => setOriginalSearch(event.target.value)} placeholder="Search segment text" type="search" value={originalSearch} />
                   </label>
+                  <div className="transcript-paragraph-list">
+                    {filteredOriginalParagraphs.length > 0 ? filteredOriginalParagraphs.map((paragraph) => (
+                      <article className="transcript-paragraph" key={paragraph.id}>
+                        <div><span>{formatTimestamp(paragraph.start)} → {formatTimestamp(paragraph.end)}</span>{paragraph.speaker_id ? <strong>{paragraph.speaker_id}</strong> : null}</div>
+                        <p>{paragraph.text}</p>
+                      </article>
+                    )) : <p className="empty-segments">No matching transcript paragraphs.</p>}
+                  </div>
                 </>
               )}
+
+              {transcript.processing_metadata ? <dl className="transcript-observability">
+                <div><dt>Raw / final segments</dt><dd>{transcript.processing_metadata.raw_segment_count} / {transcript.processing_metadata.final_segment_count}</dd></div>
+                <div><dt>Paragraphs</dt><dd>{transcript.processing_metadata.paragraph_count}</dd></div>
+                <div><dt>Diarization</dt><dd>{transcript.processing_metadata.diarization_status}</dd></div>
+                <div><dt>Glossary corrections</dt><dd>{transcript.processing_metadata.glossary_corrections_count}</dd></div>
+              </dl> : null}
 
               <div className="segment-heading">
                 <h3>{isTranslation ? "Original segments" : "Segments"}</h3>
@@ -298,7 +328,7 @@ export default function JobDetailPage() {
                 {filteredOriginalSegments.length > 0 ? filteredOriginalSegments.map((segment, index) => (
                   <article className="segment-row" key={segment.id ?? `${segment.start}-${index}`}>
                     <span>{formatTimestamp(segment.start)} → {formatTimestamp(segment.end)}</span>
-                    <p>{segment.text}</p>
+                    <div><p>{segment.text}</p><small>{segment.confidence == null ? "Confidence unavailable" : `Confidence ${(segment.confidence * 100).toFixed(1)}%`}{segment.speaker_id ? ` · ${segment.speaker_id}` : ""}{segment.paragraph_id ? ` · ${segment.paragraph_id}` : ""}</small></div>
                   </article>
                 )) : <p className="empty-segments">No matching transcript segments.</p>}
               </div>

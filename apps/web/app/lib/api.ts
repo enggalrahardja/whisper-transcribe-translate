@@ -106,6 +106,8 @@ export type TranscriptParagraph = {
   text: string;
   speaker_id: string | null;
   segment_ids: Array<number | string>;
+  confidence?: number | null;
+  confidence_status?: "High" | "Medium" | "Low" | null;
 };
 
 export type TranscriptProcessingMetadata = {

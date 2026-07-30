@@ -5,18 +5,11 @@ import { useParams } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
 import { apiBaseUrl, formatBytes, Job, Transcript } from "../../lib/api";
 import { languageLabel } from "../../lib/languages";
-import { paragraphsForDisplay } from "../../../lib/transcript-view-model.mjs";
+import { createTranscriptExport, DEFAULT_TRANSCRIPT_EXPORT_OPTIONS } from "../../../lib/transcript-export.mjs";
+import { formatBrowserDate, paragraphsForDisplay } from "../../../lib/transcript-view-model.mjs";
 
 const pollingIntervalMs = 1500;
 const activeStatuses = new Set(["queued", "processing"]);
-
-function formatDate(value: string | null): string {
-  if (!value) return "—";
-  return new Intl.DateTimeFormat(undefined, {
-    dateStyle: "medium",
-    timeStyle: "medium",
-  }).format(new Date(value));
-}
 
 function formatTimestamp(seconds: number): string {
   const safeSeconds = Math.max(0, seconds);
@@ -45,6 +38,13 @@ export default function JobDetailPage() {
   const [originalSearch, setOriginalSearch] = useState("");
   const [translatedSearch, setTranslatedSearch] = useState("");
   const [copyStatus, setCopyStatus] = useState<"original" | "translated" | "failed" | "">("");
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
+  const [exportOptions, setExportOptions] = useState({ ...DEFAULT_TRANSCRIPT_EXPORT_OPTIONS });
+  const [browserFormattingReady, setBrowserFormattingReady] = useState(false);
+
+  useEffect(() => {
+    setBrowserFormattingReady(true);
+  }, []);
 
   useEffect(() => {
     let disposed = false;
@@ -141,6 +141,26 @@ export default function JobDetailPage() {
     }
   }
 
+  function openExportMenu() {
+    setExportOptions({ ...DEFAULT_TRANSCRIPT_EXPORT_OPTIONS });
+    setExportMenuOpen(true);
+  }
+
+  function saveTranscript() {
+    if (!job) return;
+    const transcriptExport = createTranscriptExport(job.file_name, filteredOriginalParagraphs, exportOptions);
+    const blob = new Blob([transcriptExport.content], { type: transcriptExport.mimeType });
+    const downloadUrl = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = downloadUrl;
+    link.download = transcriptExport.filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(downloadUrl);
+    setExportMenuOpen(false);
+  }
+
   if (loading) {
     return <section className="job-detail-card"><p className="eyebrow">TRANSCRIBE AUDIO</p><h1>Loading job…</h1></section>;
   }
@@ -186,9 +206,9 @@ export default function JobDetailPage() {
           <div><dt>Model</dt><dd>{job.model}</dd></div>
           <div><dt>{isTranslation ? "Source language" : "Language"}</dt><dd>{languageLabel(job.language)}</dd></div>
           {isTranslation ? <div><dt>Target language</dt><dd>{languageLabel(job.target_language)}</dd></div> : null}
-          <div><dt>Created</dt><dd>{formatDate(job.created_at)}</dd></div>
-          <div><dt>Started</dt><dd>{formatDate(job.started_at)}</dd></div>
-          <div><dt>Completed</dt><dd>{formatDate(job.completed_at)}</dd></div>
+          <div><dt>Created</dt><dd>{browserFormattingReady ? formatBrowserDate(job.created_at) : "—"}</dd></div>
+          <div><dt>Started</dt><dd>{browserFormattingReady ? formatBrowserDate(job.started_at) : "—"}</dd></div>
+          <div><dt>Completed</dt><dd>{browserFormattingReady ? formatBrowserDate(job.completed_at) : "—"}</dd></div>
         </dl>
 
         {job.transcription_config ? <details className="job-config-details">
@@ -249,11 +269,37 @@ export default function JobDetailPage() {
               ) : null}
             </div>
             {!isTranslation ? (
-              <button disabled={!transcript} onClick={() => copyTranscript(originalText, "original")} type="button">
-                {copyStatus === "original" ? "Copied" : copyStatus === "failed" ? "Copy failed" : "Copy transcript"}
+              <button disabled={!transcript} onClick={openExportMenu} type="button">
+                Save Transcript
               </button>
             ) : null}
           </div>
+
+          {exportMenuOpen ? (
+            <div aria-label="Save Transcript options" className="transcript-export-menu" role="dialog">
+              <div className="transcript-export-menu-heading">
+                <h3>Save Transcript</h3>
+                <button aria-label="Close export options" className="export-close-button" onClick={() => setExportMenuOpen(false)} type="button">×</button>
+              </div>
+              <p>Select optional metadata to include in the downloaded transcript.</p>
+              <label>
+                <input checked={exportOptions.includeTimestamp} onChange={(event) => setExportOptions((current) => ({ ...current, includeTimestamp: event.target.checked }))} type="checkbox" />
+                Include timestamp
+              </label>
+              <label>
+                <input checked={exportOptions.includeConfidenceValue} onChange={(event) => setExportOptions((current) => ({ ...current, includeConfidenceValue: event.target.checked }))} type="checkbox" />
+                Include confidence value
+              </label>
+              <label>
+                <input checked={exportOptions.includeConfidenceStatus} onChange={(event) => setExportOptions((current) => ({ ...current, includeConfidenceStatus: event.target.checked }))} type="checkbox" />
+                Include confidence status
+              </label>
+              <div className="transcript-export-actions">
+                <button className="secondary" onClick={() => setExportMenuOpen(false)} type="button">Cancel</button>
+                <button onClick={saveTranscript} type="button">Download .txt</button>
+              </div>
+            </div>
+          ) : null}
 
           {resultError ? <p className="error-callout" role="alert">{resultError}</p> : null}
           {!transcript && !resultError ? <p>Loading transcript result…</p> : null}
@@ -278,6 +324,7 @@ export default function JobDetailPage() {
                         <article className="transcript-paragraph" key={paragraph.id}>
                           <div><span>{formatTimestamp(paragraph.start)} → {formatTimestamp(paragraph.end)}</span>{paragraph.speaker_id ? <strong>{paragraph.speaker_id}</strong> : null}</div>
                           <p>{paragraph.text}</p>
+                          <small className="paragraph-confidence">{paragraph.confidence == null || !paragraph.confidence_status ? "Confidence unavailable" : `Confidence ${Math.round(paragraph.confidence * 100)}% · ${paragraph.confidence_status}`}</small>
                         </article>
                       )) : <p className="empty-segments">No matching original transcript paragraphs.</p>}
                     </div>
@@ -307,6 +354,7 @@ export default function JobDetailPage() {
                       <article className="transcript-paragraph" key={paragraph.id}>
                         <div><span>{formatTimestamp(paragraph.start)} → {formatTimestamp(paragraph.end)}</span>{paragraph.speaker_id ? <strong>{paragraph.speaker_id}</strong> : null}</div>
                         <p>{paragraph.text}</p>
+                        <small className="paragraph-confidence">{paragraph.confidence == null || !paragraph.confidence_status ? "Confidence unavailable" : `Confidence ${Math.round(paragraph.confidence * 100)}% · ${paragraph.confidence_status}`}</small>
                       </article>
                     )) : <p className="empty-segments">No matching transcript paragraphs.</p>}
                   </div>
@@ -320,35 +368,38 @@ export default function JobDetailPage() {
                 <div><dt>Glossary corrections</dt><dd>{transcript.processing_metadata.glossary_corrections_count}</dd></div>
               </dl> : null}
 
-              <div className="segment-heading">
-                <h3>{isTranslation ? "Original segments" : "Segments"}</h3>
-                <span>{filteredOriginalSegments.length} shown</span>
-              </div>
-              <div className="segment-list">
-                {filteredOriginalSegments.length > 0 ? filteredOriginalSegments.map((segment, index) => (
-                  <article className="segment-row" key={segment.id ?? `${segment.start}-${index}`}>
-                    <span>{formatTimestamp(segment.start)} → {formatTimestamp(segment.end)}</span>
-                    <div><p>{segment.text}</p><small>{segment.confidence == null ? "Confidence unavailable" : `Confidence ${(segment.confidence * 100).toFixed(1)}%`}{segment.speaker_id ? ` · ${segment.speaker_id}` : ""}{segment.paragraph_id ? ` · ${segment.paragraph_id}` : ""}</small></div>
-                  </article>
-                )) : <p className="empty-segments">No matching transcript segments.</p>}
-              </div>
+              <details className="technical-details">
+                <summary>Technical Details</summary>
+                <div className="segment-heading">
+                  <h3>Raw {isTranslation ? "original " : ""}segments</h3>
+                  <span>{filteredOriginalSegments.length} shown</span>
+                </div>
+                <div className="segment-list">
+                  {filteredOriginalSegments.length > 0 ? filteredOriginalSegments.map((segment, index) => (
+                    <article className="segment-row" key={segment.id ?? `${segment.start}-${index}`}>
+                      <span>{formatTimestamp(segment.start)} → {formatTimestamp(segment.end)}</span>
+                      <div><p>{segment.text}</p><small>{segment.confidence == null ? "Confidence unavailable" : `Confidence ${(segment.confidence * 100).toFixed(1)}%`}{segment.speaker_id ? ` · ${segment.speaker_id}` : ""}{segment.paragraph_id ? ` · ${segment.paragraph_id}` : ""}</small></div>
+                    </article>
+                  )) : <p className="empty-segments">No matching transcript segments.</p>}
+                </div>
 
-              {isTranslation && transcript.translated_segments ? (
-                <>
-                  <div className="segment-heading translated-segment-heading">
-                    <h3>Translated segments</h3>
-                    <span>{filteredTranslatedSegments.length} shown</span>
-                  </div>
-                  <div className="segment-list">
-                    {filteredTranslatedSegments.length > 0 ? filteredTranslatedSegments.map((segment, index) => (
-                      <article className="segment-row" key={segment.id ?? `${segment.start}-${index}`}>
-                        <span>{formatTimestamp(segment.start)} → {formatTimestamp(segment.end)}</span>
-                        <p>{segment.text}</p>
-                      </article>
-                    )) : <p className="empty-segments">No matching translated segments.</p>}
-                  </div>
-                </>
-              ) : null}
+                {isTranslation && transcript.translated_segments ? (
+                  <>
+                    <div className="segment-heading translated-segment-heading">
+                      <h3>Raw translated segments</h3>
+                      <span>{filteredTranslatedSegments.length} shown</span>
+                    </div>
+                    <div className="segment-list">
+                      {filteredTranslatedSegments.length > 0 ? filteredTranslatedSegments.map((segment, index) => (
+                        <article className="segment-row" key={segment.id ?? `${segment.start}-${index}`}>
+                          <span>{formatTimestamp(segment.start)} → {formatTimestamp(segment.end)}</span>
+                          <p>{segment.text}</p>
+                        </article>
+                      )) : <p className="empty-segments">No matching translated segments.</p>}
+                    </div>
+                  </>
+                ) : null}
+              </details>
             </>
           ) : null}
 

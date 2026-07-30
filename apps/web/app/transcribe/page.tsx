@@ -13,24 +13,24 @@ type CreatedJob = {
 };
 
 const initialAdvancedSettings: AdvancedTranscriptionSettings = {
-  processing_mode: "standard",
-  force_language: false,
+  processing_mode: "interview",
+  force_language: true,
   use_vad: true,
-  vad: { minimum_silence_ms: 600, maximum_segment_duration_seconds: 30, speech_padding_ms: 300 },
+  vad: { minimum_silence_ms: 800, maximum_segment_duration_seconds: 15, speech_padding_ms: 300 },
   use_previous_segment_context: true,
   apply_glossary: false,
   glossary_id: null,
-  accurate_final: false,
-  accurate: { beam_size: 5, best_of: 5, temperature: 0, word_timestamps: false },
+  accurate_final: true,
+  accurate: { beam_size: 5, best_of: 5, temperature: 0, word_timestamps: true },
   speaker_diarization: false,
-  transcript_style: "verbatim",
-  low_confidence_handling: "keep",
+  transcript_style: "verbatim_normalized",
+  low_confidence_handling: "mark",
 };
 
 export default function TranscribePage() {
   const router = useRouter();
   const [file, setFile] = useState<File | null>(null);
-  const [language, setLanguage] = useState("auto");
+  const [language, setLanguage] = useState("indonesian");
   const [model, setModel] = useState("");
   const [availableModels, setAvailableModels] = useState<AvailableWhisperModel[]>([]);
   const [modelsLoading, setModelsLoading] = useState(true);
@@ -52,11 +52,13 @@ export default function TranscribePage() {
         const settings = await settingsResponse.json() as ApplicationSettings;
         setGlossaries(await glossariesResponse.json() as GlossaryOption[]);
         setAvailableModels(models);
-        setLanguage(settings.general.default_language);
-        setAdvanced((current) => ({ ...current, force_language: settings.general.default_language !== "auto" }));
-        setModel(models.some(({ model }) => model === settings.general.default_whisper_model)
-          ? settings.general.default_whisper_model
-          : "");
+        setLanguage("indonesian");
+        setAdvanced((current) => ({ ...current, force_language: true }));
+        setModel(models.some(({ model }) => model === "medium")
+          ? "medium"
+          : models.some(({ model }) => model === settings.general.default_whisper_model)
+            ? settings.general.default_whisper_model
+            : "");
       }).catch((error) => {
         if (error instanceof DOMException && error.name === "AbortError") return;
         setModelsError(error instanceof Error ? error.message : "Available Whisper models could not be loaded");

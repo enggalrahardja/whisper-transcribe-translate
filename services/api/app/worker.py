@@ -3,6 +3,7 @@ import os
 import signal
 import socket
 import threading
+import traceback
 from datetime import datetime, timedelta, timezone
 from time import monotonic
 
@@ -25,6 +26,10 @@ from .services.whisper_models import (
 )
 from .services.storage import resolve_storage_file
 from .services.job_transcription import apply_job_output_config, inference_options
+from .services.dependency_compatibility import (
+    validate_worker_dependencies,
+    worker_dependency_versions,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("transcription-worker")
@@ -301,6 +306,7 @@ class TranscriptionWorker:
         job_id: ObjectId,
         error: str,
         model_load_metadata: dict[str, object] | None = None,
+        error_traceback: str | None = None,
     ) -> bool:
         now = utc_now()
         fields: dict[str, object] = {
@@ -311,6 +317,7 @@ class TranscriptionWorker:
             "heartbeat_at": now,
             "completed_at": now,
             "updated_at": now,
+            "error_traceback": error_traceback,
         }
         if model_load_metadata is not None:
             fields["model_load_metadata"] = model_load_metadata
@@ -322,7 +329,16 @@ class TranscriptionWorker:
                 "cancellation_requested": {"$ne": True},
             },
             {
-                "$set": fields
+                "$set": fields,
+                "$push": {
+                    "failure_history": {
+                        "occurred_at": now,
+                        "worker_id": self.worker_id,
+                        "error": error,
+                        "traceback": error_traceback,
+                        "dependency_versions": worker_dependency_versions(),
+                    }
+                },
             },
         )
         return result.modified_count == 1
@@ -598,7 +614,12 @@ class TranscriptionWorker:
             metadata = self.adapter.last_load_metadata
             if self.cancel_current_job():
                 logger.info("Cancelled job %s while handling CUDA OOM", job_id)
-            elif self.fail_job(job_id, error, model_load_metadata=metadata):
+            elif self.fail_job(
+                job_id,
+                error,
+                model_load_metadata=metadata,
+                error_traceback=traceback.format_exc(),
+            ):
                 logger.exception("Failed job %s: %s", job_id, error)
             elif self.cancel_current_job():
                 logger.info("Cancelled job %s after CUDA OOM", job_id)
@@ -610,9 +631,10 @@ class TranscriptionWorker:
                 logger.info("Released interrupted job %s", job_id)
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
+            error_traceback = traceback.format_exc()
             if self.cancel_current_job():
                 logger.info("Cancelled job %s while handling error", job_id)
-            elif self.fail_job(job_id, error):
+            elif self.fail_job(job_id, error, error_traceback=error_traceback):
                 logger.exception("Failed job %s: %s", job_id, error)
             elif self.cancel_current_job():
                 logger.info("Cancelled job %s after a concurrent error", job_id)
@@ -639,6 +661,7 @@ class TranscriptionWorker:
                     "effective_device_setting": self.adapter.device_setting,
                     "configured_concurrency": self.application_settings.transcription.maximum_concurrent_transcription_jobs,
                     "settings_version": latest_settings.version,
+                    "dependency_versions": worker_dependency_versions(),
                     "updated_at": now,
                 },
                 "$setOnInsert": {"started_at": now},
@@ -658,6 +681,8 @@ class TranscriptionWorker:
         if register_signals:
             signal.signal(signal.SIGINT, self.handle_shutdown)
             signal.signal(signal.SIGTERM, self.handle_shutdown)
+        dependency_versions = validate_worker_dependencies()
+        logger.info("Worker dependency preflight passed: %s", dependency_versions)
         self.ensure_indexes()
         recovered = self.recover_stale_jobs()
         logger.info("Worker %s started; recovered %s stale job(s)", self.worker_id, recovered)

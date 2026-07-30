@@ -193,11 +193,22 @@ header p, .service-card p, .jobs-panel p { color: #687086; }
 .transcript-heading { margin-bottom: 20px; }
 .transcript-heading button { flex: none; padding: 10px 14px; border: 0; border-radius: 10px; color: #fff; background: #5b55d9; font-weight: 700; cursor: pointer; }
 .transcript-heading button:disabled { cursor: wait; opacity: .55; }
+.transcript-export-menu { display: grid; gap: 12px; margin: -4px 0 22px auto; padding: 18px; max-width: 420px; border: 1px solid #dfe2eb; border-radius: 14px; background: #fff; box-shadow: 0 14px 35px rgba(33, 42, 72, .12); }
+.transcript-export-menu-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.transcript-export-menu-heading h3, .transcript-export-menu p { margin: 0; }
+.transcript-export-menu p { color: #687086; font-size: 13px; }
+.transcript-export-menu > label { display: flex; align-items: center; gap: 9px; color: #4e566d; font-size: 13px; font-weight: 700; }
+.transcript-export-menu input { width: 17px; height: 17px; accent-color: #5b55d9; }
+.transcript-export-menu .export-close-button { padding: 2px 8px; border: 0; color: #596176; background: transparent; font-size: 24px; cursor: pointer; }
+.transcript-export-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 5px; }
+.transcript-export-actions button { padding: 9px 12px; border: 1px solid #5b55d9; border-radius: 9px; color: #fff; background: #5b55d9; font-weight: 700; cursor: pointer; }
+.transcript-export-actions button.secondary { color: #514abf; background: #fff; }
 .transcript-text { padding: 20px; border: 1px solid #e4e7ef; border-radius: 14px; background: #fafbfe; white-space: pre-wrap; line-height: 1.75; }
 .transcript-paragraph-list { display: grid; gap: 14px; }
 .transcript-paragraph { padding: 18px 20px; border: 1px solid #e4e7ef; border-radius: 14px; background: #fafbfe; }
 .transcript-paragraph > div { display: flex; justify-content: space-between; gap: 14px; margin-bottom: 9px; color: #665df1; font-size: 12px; font-weight: 800; }
 .transcript-paragraph p { margin: 0; color: #3f475d; line-height: 1.75; }
+.paragraph-confidence { display: block; margin-top: 10px; color: #737b91; font-weight: 700; }
 .transcript-observability { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 22px 0; }
 .transcript-observability > div { padding: 12px; border: 1px solid #e8eaf1; border-radius: 10px; }
 .transcript-observability dt { margin-bottom: 5px; color: #737b91; font-size: 10px; font-weight: 800; text-transform: uppercase; }
@@ -207,6 +218,9 @@ header p, .service-card p, .jobs-panel p { color: #687086; }
 .translation-panel h3 { margin-bottom: 12px; }
 .transcript-search { display: grid; gap: 8px; margin: 22px 0; color: #4e566d; font-size: 13px; font-weight: 700; }
 .transcript-search input { width: 100%; padding: 11px 13px; border: 1px solid #dfe2eb; border-radius: 10px; background: #fff; }
+.technical-details { margin-top: 22px; padding: 16px; border: 1px solid #e4e7ef; border-radius: 14px; }
+.technical-details summary { color: #514abf; font-weight: 800; cursor: pointer; }
+.technical-details[open] summary { margin-bottom: 18px; }
 .segment-heading { align-items: center; margin-bottom: 12px; }
 .translated-segment-heading { margin-top: 24px; }
 .segment-heading h3 { margin-bottom: 0; }

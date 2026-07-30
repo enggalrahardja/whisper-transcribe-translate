@@ -80,6 +80,8 @@ class JobResponse(BaseModel):
     file_size: int | None = None
     content_type: str | None = None
     error: str | None = None
+    error_traceback: str | None = None
+    failure_history: list[dict[str, object]] = Field(default_factory=list)
     model_load_metadata: dict[str, object] | None = None
     processing_observability: dict[str, object] | None = None
     cancellation_requested: bool = False

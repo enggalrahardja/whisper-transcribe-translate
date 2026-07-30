@@ -42,6 +42,7 @@ class JobResponse(BaseModel):
     file_size: int | None = None
     content_type: str | None = None
     error: str | None = None
+    model_load_metadata: dict[str, object] | None = None
     cancellation_requested: bool = False
     worker_id: str | None = None
     transcript_id: str | None = None

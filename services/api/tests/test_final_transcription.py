@@ -262,16 +262,17 @@ class PersistentFinalModelTests(unittest.TestCase):
                 }
 
         adapter = FakeAdapter()
+        checkpoint_path = Path("C:/models/base.pt")
         transcriber = PersistentLocalFinalTranscriber(
             FinalTranscriptionConfig(model="base", device="cpu", compute_type="float32"),
             adapter=adapter,
-            checkpoint_resolver=lambda _model: Path("C:/models/base.pt"),
+            checkpoint_resolver=lambda _model: checkpoint_path,
         )
         output = transcriber.transcribe(request(), 1)
         metadata = output.metadata
         self.assertTrue(adapter.audio_existed)
         self.assertEqual(metadata.model, "base")
-        self.assertEqual(metadata.checkpoint_path, "C:\\models\\base.pt")
+        self.assertEqual(Path(metadata.checkpoint_path), checkpoint_path)
         self.assertEqual(metadata.device, "cpu")
         self.assertEqual(metadata.compute_type, "float32")
         self.assertEqual(metadata.language, "en")

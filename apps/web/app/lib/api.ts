@@ -48,6 +48,14 @@ export type Job = {
   file_size: number | null;
   content_type: string | null;
   error: string | null;
+  model_load_metadata: {
+    requested_model: string;
+    active_model: string | null;
+    device: string;
+    compute_type: string;
+    vram_free_bytes_before_load: number | null;
+    vram_total_bytes_before_load: number | null;
+  } | null;
   cancellation_requested: boolean;
   worker_id: string | null;
   transcript_id: string | null;

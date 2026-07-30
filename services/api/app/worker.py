@@ -8,6 +8,7 @@ from time import monotonic
 
 from bson import ObjectId
 from pymongo import ASCENDING, ReturnDocument
+import torch
 
 from .config import get_settings
 from .database import close_database, get_database
@@ -116,6 +117,7 @@ class TranscriptionWorker:
                     "completed_at": "",
                     "progress_stage": "",
                     "progress_message": "",
+                    "model_load_metadata": "",
                 },
             },
         )
@@ -293,8 +295,24 @@ class TranscriptionWorker:
         )
         return result.modified_count == 1
 
-    def fail_job(self, job_id: ObjectId, error: str) -> bool:
+    def fail_job(
+        self,
+        job_id: ObjectId,
+        error: str,
+        model_load_metadata: dict[str, object] | None = None,
+    ) -> bool:
         now = utc_now()
+        fields: dict[str, object] = {
+            "status": "failed",
+            "error": error,
+            "progress_stage": None,
+            "progress_message": None,
+            "heartbeat_at": now,
+            "completed_at": now,
+            "updated_at": now,
+        }
+        if model_load_metadata is not None:
+            fields["model_load_metadata"] = model_load_metadata
         result = self.jobs.update_one(
             {
                 "_id": job_id,
@@ -303,18 +321,32 @@ class TranscriptionWorker:
                 "cancellation_requested": {"$ne": True},
             },
             {
-                "$set": {
-                    "status": "failed",
-                    "error": error,
-                    "progress_stage": None,
-                    "progress_message": None,
-                    "heartbeat_at": now,
-                    "completed_at": now,
-                    "updated_at": now,
-                }
+                "$set": fields
             },
         )
         return result.modified_count == 1
+
+    def save_model_load_metadata(self, job_id: ObjectId) -> None:
+        metadata = self.adapter.last_load_metadata
+        if metadata is None:
+            return
+        self.jobs.update_one(
+            {
+                "_id": job_id,
+                "status": "processing",
+                "worker_id": self.worker_id,
+            },
+            {"$set": {"model_load_metadata": metadata, "updated_at": utc_now()}},
+        )
+
+    @staticmethod
+    def cuda_oom_message(model_name: str) -> str:
+        return (
+            f'CUDA out of memory while loading or running Whisper model "{model_name}". '
+            "The GPU model cache was released and the worker remains available. "
+            "Select a smaller Whisper model (for example medium, small, base, or tiny) "
+            "or explicitly configure CPU processing, then retry the job."
+        )
 
     def cancel_current_job(self) -> bool:
         if self.current_job_id is None:
@@ -439,7 +471,9 @@ class TranscriptionWorker:
             self.adapter.load_model(
                 model_name,
                 cancel_callback=self.should_cancel_current_job,
+                fp16=transcription_settings.fp16,
             )
+            self.save_model_load_metadata(job_id)
             if self.should_cancel_current_job() or not self.update_progress(job_id, 30, "loading_media", "Preparing media"):
                 self.cancel_current_job()
                 return
@@ -499,6 +533,16 @@ class TranscriptionWorker:
                 logger.info("Completed job %s with transcript %s", job_id, transcript_id)
             elif self.cancel_current_job():
                 logger.info("Cancelled job %s after transcription", job_id)
+        except torch.cuda.OutOfMemoryError:
+            self.adapter.release_cache()
+            error = self.cuda_oom_message(str(job.get("model", "base")))
+            metadata = self.adapter.last_load_metadata
+            if self.cancel_current_job():
+                logger.info("Cancelled job %s while handling CUDA OOM", job_id)
+            elif self.fail_job(job_id, error, model_load_metadata=metadata):
+                logger.exception("Failed job %s: %s", job_id, error)
+            elif self.cancel_current_job():
+                logger.info("Cancelled job %s after CUDA OOM", job_id)
         except InterruptedError:
             if self.cancel_current_job():
                 logger.info("Cancelled interrupted job %s", job_id)

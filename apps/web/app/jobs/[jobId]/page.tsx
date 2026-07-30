@@ -182,6 +182,21 @@ export default function JobDetailPage() {
           <div><dt>Completed</dt><dd>{formatDate(job.completed_at)}</dd></div>
         </dl>
 
+        {job.transcription_config ? <details className="job-config-details">
+          <summary>Advanced transcription settings</summary>
+          <dl className="job-metadata">
+            <div><dt>Mode</dt><dd>{job.transcription_config.processing_mode.replaceAll("_", " ")}</dd></div>
+            <div><dt>Language</dt><dd>{job.transcription_config.force_language ? "Forced" : "Auto-detect"}</dd></div>
+            <div><dt>VAD</dt><dd>{job.transcription_config.use_vad ? "On" : "Off"}</dd></div>
+            <div><dt>Previous context</dt><dd>{job.transcription_config.use_previous_segment_context ? "On" : "Off"}</dd></div>
+            <div><dt>Glossary</dt><dd>{job.transcription_config.apply_glossary ? job.transcription_config.glossary_id : "Off"}</dd></div>
+            <div><dt>Accurate final</dt><dd>{job.transcription_config.accurate_final ? "On" : "Off"}</dd></div>
+            <div><dt>Diarization</dt><dd>{job.transcription_config.speaker_diarization ? "Requested (if available)" : "Off"}</dd></div>
+            <div><dt>Style</dt><dd>{job.transcription_config.transcript_style.replaceAll("_", " ")}</dd></div>
+            <div><dt>Low confidence</dt><dd>{job.transcription_config.low_confidence_handling}</dd></div>
+          </dl>
+        </details> : null}
+
         <div className="progress-heading"><span>Progress</span><strong>{job.progress}%</strong></div>
         <div
           aria-label={`${taskLabel} progress: ${job.progress}%`}

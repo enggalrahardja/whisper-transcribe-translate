@@ -33,6 +33,27 @@ export type AvailableWhisperModel = {
   last_verified_at: string | null;
 };
 
+export type GlossaryOption = { id: string; name: string };
+
+export type AdvancedTranscriptionSettings = {
+  processing_mode: "standard" | "interview" | "lecture" | "clean";
+  force_language: boolean;
+  use_vad: boolean;
+  vad: {
+    minimum_silence_ms: number;
+    maximum_segment_duration_seconds: number;
+    speech_padding_ms: number;
+  };
+  use_previous_segment_context: boolean;
+  apply_glossary: boolean;
+  glossary_id: string | null;
+  accurate_final: boolean;
+  accurate: { beam_size: number; best_of: number; temperature: number; word_timestamps: boolean };
+  speaker_diarization: boolean;
+  transcript_style: "verbatim" | "verbatim_normalized" | "clean";
+  low_confidence_handling: "keep" | "mark" | "replace";
+};
+
 export type Job = {
   id: string;
   file_name: string;
@@ -41,6 +62,7 @@ export type Job = {
   model: string;
   task: string;
   target_language: string | null;
+  transcription_config: AdvancedTranscriptionSettings | null;
   status: JobStatus;
   progress: number;
   progress_stage: string | null;

@@ -192,6 +192,9 @@ class WhisperAdapter:
         temperature: float | None = None,
         initial_prompt: str | None = None,
         word_timestamps: bool = False,
+        best_of: int | None = None,
+        condition_on_previous_text: bool = True,
+        no_speech_threshold: float | None = 0.6,
     ) -> dict:
         with self._operation_lock():
             model = self._load_model_locked(model_name, cancel_callback, fp16)
@@ -204,9 +207,12 @@ class WhisperAdapter:
                         task="transcribe",
                         fp16=(str(model.device).startswith("cuda") if fp16 is None else fp16 and str(model.device).startswith("cuda")),
                         beam_size=beam_size,
+                        best_of=best_of,
                         temperature=temperature if temperature is not None else (0.0, 0.2, 0.4, 0.6, 0.8, 1.0),
                         initial_prompt=initial_prompt or None,
                         word_timestamps=word_timestamps,
+                        condition_on_previous_text=condition_on_previous_text,
+                        no_speech_threshold=no_speech_threshold,
                         verbose=None,
                         cancel_func=cancel_callback or (lambda: False),
                         progress_callback=progress_callback,

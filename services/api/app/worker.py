@@ -24,6 +24,7 @@ from .services.whisper_models import (
     whisper_model_unavailable_message,
 )
 from .services.storage import resolve_storage_file
+from .services.job_transcription import apply_job_output_config, inference_options
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("transcription-worker")
@@ -466,6 +467,7 @@ class TranscriptionWorker:
                 self.cancel_current_job()
                 return
             transcription_settings = get_application_settings().transcription
+            job_inference = inference_options(job, get_application_settings())
             model_name = str(job.get("model", "base"))
 
             self.adapter.load_model(
@@ -501,15 +503,19 @@ class TranscriptionWorker:
             result = self.adapter.transcribe(
                 audio_path,
                 model_name=model_name,
-                language=str(job.get("language", "auto")),
+                language=job_inference.language,
                 progress_callback=on_whisper_progress,
                 cancel_callback=self.should_cancel_current_job,
                 fp16=transcription_settings.fp16,
-                beam_size=transcription_settings.beam_size,
-                temperature=transcription_settings.temperature,
-                initial_prompt=transcription_settings.initial_prompt,
-                word_timestamps=transcription_settings.word_timestamps,
+                beam_size=job_inference.beam_size,
+                best_of=job_inference.best_of,
+                temperature=job_inference.temperature,
+                initial_prompt=job_inference.initial_prompt,
+                word_timestamps=job_inference.word_timestamps,
+                condition_on_previous_text=job_inference.condition_on_previous_text,
+                no_speech_threshold=job_inference.no_speech_threshold,
             )
+            result = apply_job_output_config(result, job)
             original_text = str(result.get("text", "")).strip()
             if is_translation and not original_text:
                 raise ValueError("Transcription is empty; there is no text to save or translate")

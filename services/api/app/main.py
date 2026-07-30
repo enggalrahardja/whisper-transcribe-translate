@@ -9,6 +9,7 @@ from pymongo.errors import PyMongoError
 from .config import get_settings
 from .database import close_database, get_database
 from .routes.jobs import router as jobs_router
+from .routes.glossaries import router as glossaries_router
 from .routes.live import (
     router as live_router,
     shutdown_final_transcription_queue,
@@ -108,6 +109,7 @@ app.add_middleware(
     allow_headers=["Content-Type", "Authorization"],
 )
 app.include_router(jobs_router)
+app.include_router(glossaries_router)
 app.include_router(live_router)
 app.include_router(settings_router)
 app.include_router(subtitles_router)

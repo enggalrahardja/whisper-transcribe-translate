@@ -1,6 +1,7 @@
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
+from pydantic import ValidationError
 
-from ..models.job import JobResponse
+from ..models.job import AdvancedTranscriptionSettings, JobResponse
 from ..services.jobs import create_uploaded_job
 from ..services.media_files import create_media_file
 from ..services.storage import save_upload
@@ -17,6 +18,7 @@ async def upload_media(
     model: str = Form(default="base", pattern="^(tiny|base|small|medium|large)$"),
     task: str = Form(default="transcribe", pattern="^(transcribe|translate)$"),
     target_language: str | None = Form(default=None),
+    transcription_config: str | None = Form(default=None),
 ) -> JobResponse:
     with whisper_model_usage(model, "upload-request"):
         if task == "translate":
@@ -24,6 +26,15 @@ async def upload_media(
                 target_language = normalize_target_language(target_language)
             except ValueError as exc:
                 raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+        parsed_config: AdvancedTranscriptionSettings | None = None
+        if transcription_config is not None:
+            try:
+                parsed_config = AdvancedTranscriptionSettings.model_validate_json(transcription_config)
+            except ValidationError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail="Invalid advanced transcription settings",
+                ) from exc
         media = await save_upload(file)
         media_file = create_media_file(media)
         return create_uploaded_job(
@@ -34,4 +45,5 @@ async def upload_media(
             task=task,
             target_language=target_language,
             availability_reserved=True,
+            transcription_config=parsed_config.model_dump() if parsed_config else None,
         )

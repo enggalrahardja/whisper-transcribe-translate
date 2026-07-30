@@ -147,6 +147,15 @@ header p, .service-card p, .jobs-panel p { color: #687086; }
 .upload-options.translate-options { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .upload-options label { display: grid; gap: 8px; color: #4e566d; font-size: 13px; font-weight: 700; }
 .upload-options select { width: 100%; padding: 11px 12px; border: 1px solid #dfe2eb; border-radius: 10px; background: #fff; }
+.advanced-transcription-settings { min-width: 0; margin: 0; padding: 20px; border: 1px solid #e4e7ef; border-radius: 14px; }
+.advanced-transcription-settings legend { padding: 0 8px; color: #353d55; font-weight: 800; }
+.advanced-settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.advanced-settings-grid > label:not(.advanced-toggle), .conditional-settings label { display: grid; gap: 7px; color: #4e566d; font-size: 12px; font-weight: 700; }
+.advanced-settings-grid select, .advanced-settings-grid input:not([type="checkbox"]) { width: 100%; min-width: 0; padding: 10px 11px; border: 1px solid #dfe2eb; border-radius: 9px; color: #252d43; background: #fff; font: inherit; }
+.advanced-toggle { display: flex; align-items: center; gap: 9px; min-height: 40px; color: #4e566d; font-size: 13px; font-weight: 700; }
+.advanced-toggle input { width: 17px; height: 17px; accent-color: #5b55d9; }
+.conditional-settings { grid-column: 1 / -1; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; padding: 14px; border-radius: 11px; background: #f7f7fd; }
+.conditional-settings.four-columns { grid-template-columns: repeat(4, minmax(0, 1fr)); }
 .upload-summary, .job-metadata { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin: 0; }
 .upload-summary > div, .job-metadata > div { min-width: 0; padding: 14px; border: 1px solid #e8eaf1; border-radius: 12px; background: #fafbfe; }
 .upload-summary dt, .job-metadata dt { margin-bottom: 5px; color: #737b91; font-size: 12px; font-weight: 700; text-transform: uppercase; }
@@ -169,6 +178,9 @@ header p, .service-card p, .jobs-panel p { color: #687086; }
 .status-failed { color: #a23c3c; background: #fdecec; }
 .status-cancelled { color: #596176; background: #eceef3; }
 .job-metadata { grid-template-columns: repeat(4, minmax(0, 1fr)); margin-bottom: 26px; }
+.job-config-details { margin: -8px 0 26px; }
+.job-config-details summary { margin-bottom: 14px; color: #514abf; font-weight: 700; cursor: pointer; }
+.job-config-details .job-metadata { margin-bottom: 0; }
 .progress-heading { align-items: center; margin-bottom: 9px; color: #596176; font-size: 13px; }
 .progress-heading strong { color: #353d55; }
 .progress-track { height: 11px; overflow: hidden; border-radius: 999px; background: #e8eaf1; }
@@ -408,7 +420,7 @@ header p, .service-card p, .jobs-panel p { color: #687086; }
 @media (max-width: 640px) {
   .content { padding: 22px; }
   header { flex-direction: column; }
-  .stats, .service-grid, .upload-options, .upload-options.translate-options, .upload-summary, .job-metadata, .translation-results { grid-template-columns: 1fr; }
+  .stats, .service-grid, .upload-options, .upload-options.translate-options, .upload-summary, .job-metadata, .translation-results, .advanced-settings-grid, .conditional-settings, .conditional-settings.four-columns { grid-template-columns: 1fr; }
   .job-row { flex-direction: column; }
   .job-row > div:last-child { align-items: flex-start; }
   .transcribe-card { padding: 22px; }

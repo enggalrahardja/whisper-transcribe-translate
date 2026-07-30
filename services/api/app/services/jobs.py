@@ -7,6 +7,7 @@ from pymongo import DESCENDING, ReturnDocument
 from ..database import get_database
 from ..models.job import CreateJobRequest, JobResponse, JobStatus
 from .media_files import COLLECTION_NAME as MEDIA_FILES_COLLECTION
+from .job_glossaries import resolve_job_glossary
 from .translation_adapter import normalize_target_language
 from .transcripts import COLLECTION_NAME as TRANSCRIPTS_COLLECTION
 from .storage import resolve_storage_file
@@ -32,6 +33,7 @@ def _serialize_job(document: dict) -> JobResponse:
         model=document["model"],
         task=document["task"],
         target_language=document.get("target_language"),
+        transcription_config=document.get("transcription_config"),
         status=document["status"],
         progress=document.get("progress", 0),
         progress_stage=document.get("progress_stage"),
@@ -69,6 +71,11 @@ def _insert_job(document: dict) -> JobResponse:
 
 def create_job(payload: CreateJobRequest) -> JobResponse:
     document = payload.model_dump()
+    if payload.transcription_config and payload.transcription_config.apply_glossary:
+        try:
+            resolve_job_glossary(str(payload.transcription_config.glossary_id))
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     if payload.task == "translate":
         try:
             document["target_language"] = normalize_target_language(payload.target_language)
@@ -86,7 +93,13 @@ def create_uploaded_job(
     task: str,
     target_language: str | None = None,
     availability_reserved: bool = False,
+    transcription_config: dict[str, object] | None = None,
 ) -> JobResponse:
+    if transcription_config and transcription_config.get("apply_glossary"):
+        try:
+            resolve_job_glossary(str(transcription_config.get("glossary_id")))
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     if task == "translate":
         try:
             target_language = normalize_target_language(target_language)
@@ -100,6 +113,8 @@ def create_uploaded_job(
         "task": task,
         "target_language": target_language,
     }
+    if transcription_config is not None:
+        document["transcription_config"] = transcription_config
     if availability_reserved:
         return _insert_job(document)
     with whisper_model_usage(model, "uploaded-job-create"):

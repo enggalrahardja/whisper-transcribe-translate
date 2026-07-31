@@ -77,6 +77,7 @@ class FasterWhisperContractTests(unittest.TestCase):
         with (
             patch.dict(sys.modules, {"faster_whisper": fake_module}),
             patch("app.services.transcription_backends.activate_faster_whisper_cuda") as activate_cuda,
+            patch("app.services.transcription_backends.resolve_available_whisper_model_path", return_value=Path("/models/large-v3")),
         ):
             backend = FasterWhisperBackend()
             result = backend.load_model(
@@ -85,13 +86,14 @@ class FasterWhisperContractTests(unittest.TestCase):
 
         self.assertIs(result, loaded_model)
         activate_cuda.assert_called_once_with("int8_float16")
-        loader.assert_called_once_with("large-v3", device="cuda", compute_type="int8_float16")
+        loader.assert_called_once_with("/models/large-v3", device="cuda", compute_type="int8_float16")
 
     def test_cpu_loader_does_not_activate_cuda12_runtime(self):
         loader = MagicMock(return_value=object())
         with (
             patch.dict(sys.modules, {"faster_whisper": SimpleNamespace(WhisperModel=loader)}),
             patch("app.services.transcription_backends.activate_faster_whisper_cuda") as activate_cuda,
+            patch("app.services.transcription_backends.resolve_available_whisper_model_path", return_value=Path("/models/base")),
         ):
             FasterWhisperBackend().load_model(
                 BackendConfig("faster-whisper", "base", "cpu", "int8")
@@ -166,7 +168,7 @@ class FasterWhisperContractTests(unittest.TestCase):
         self.assertEqual(result["segments"][0]["avg_logprob"], -0.25)
         self.assertEqual(result["segments"][0]["no_speech_prob"], 0.05)
         self.assertEqual(result["segments"][0]["words"][0]["probability"], 0.9)
-        progress.assert_called_once_with(100)
+        self.assertEqual([call.args[0] for call in progress.call_args_list], [83, 100])
 
     def test_lazy_cuda_library_error_is_structured_as_inference_dependency_failure(self):
         def generated():

@@ -1,4 +1,3 @@
-from contextlib import nullcontext
 from datetime import datetime, timezone
 
 from bson import ObjectId
@@ -15,6 +14,11 @@ from .storage import resolve_storage_file
 from .whisper_models import require_whisper_model_available, whisper_model_usage
 from .application_settings import get_application_settings
 from .transcription_backends import BackendConfig, TranscriptionBackendError, resolve_backend_config, pytorch_model_name
+from .transcription_languages import (
+    job_language_code,
+    normalize_transcription_language,
+    transcription_language_label,
+)
 
 SUBTITLE_PROJECTS_COLLECTION = "subtitle_projects"
 
@@ -28,11 +32,14 @@ def ensure_job_indexes() -> None:
 
 
 def _serialize_job(document: dict) -> JobResponse:
+    language_code = job_language_code(document)
     return JobResponse(
         id=str(document["_id"]),
         file_name=document["file_name"],
         media_type=document["media_type"],
         language=document["language"],
+        language_label=document.get("language_label") or transcription_language_label(language_code),
+        language_code=language_code,
         model=document["model"],
         transcription_backend=document.get("transcription_backend", "pytorch"),
         transcription_device=document.get("transcription_device", "auto"),
@@ -98,13 +105,18 @@ def resolve_job_backend_config(
 
 
 def transcription_model_reservation(config: BackendConfig, owner: str):
-    if config.backend == "pytorch":
-        return whisper_model_usage(pytorch_model_name(config.model), owner)
-    return nullcontext()
+    model = pytorch_model_name(config.model) if config.backend == "pytorch" else config.model
+    return whisper_model_usage(model, owner, backend=config.backend)
 
 
 def create_job(payload: CreateJobRequest) -> JobResponse:
     document = payload.model_dump()
+    language_code = normalize_transcription_language(payload.language)
+    document.update(
+        language=language_code or "auto",
+        language_code=language_code,
+        language_label=transcription_language_label(language_code),
+    )
     config = resolve_job_backend_config(
         payload.model,
         payload.transcription_backend,
@@ -159,7 +171,9 @@ def create_uploaded_job(
     document = {
         **media,
         "media_file_id": media_file_id,
-        "language": language,
+        "language": normalize_transcription_language(language) or "auto",
+        "language_code": normalize_transcription_language(language),
+        "language_label": transcription_language_label(language),
         "model": model,
         "transcription_backend": transcription_backend or get_application_settings().transcription.backend,
         "transcription_device": transcription_device or get_application_settings().transcription.device,
@@ -235,8 +249,8 @@ def retry_job(job_id: str) -> JobResponse:
         str(current.get("transcription_device", "auto")),
         str(current.get("transcription_compute_type", "auto")),
     )
-    if config.backend == "pytorch":
-        require_whisper_model_available(pytorch_model_name(config.model))
+    registry_model = pytorch_model_name(config.model) if config.backend == "pytorch" else config.model
+    require_whisper_model_available(registry_model, backend=config.backend)
     if current["status"] == JobStatus.QUEUED.value:
         return _serialize_job(current)
     now = datetime.now(timezone.utc)

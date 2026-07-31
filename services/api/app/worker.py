@@ -30,6 +30,7 @@ from .services.transcription_backends import (
     pytorch_model_name,
     resolve_backend_config,
 )
+from .services.transcription_languages import InvalidTranscriptionLanguage
 from .services.storage import resolve_storage_file
 from .services.job_transcription import apply_job_output_config, inference_options
 from .services.dependency_compatibility import (
@@ -151,11 +152,21 @@ class TranscriptionWorker:
             try:
                 backend, device, compute_type = self.job_backend_request(candidate)
                 resolved = resolve_backend_config(backend, model_name, device, compute_type)
-                if resolved.backend == "pytorch":
-                    require_whisper_model_available(pytorch_model_name(resolved.model))
+                registry_model = (
+                    pytorch_model_name(resolved.model)
+                    if resolved.backend == "pytorch"
+                    else resolved.model
+                )
+                require_whisper_model_available(
+                    registry_model, backend=resolved.backend
+                )
             except (WhisperModelUnavailableError, TranscriptionBackendError) as exc:
                 now = utc_now()
-                message = str(exc) if isinstance(exc, TranscriptionBackendError) else whisper_model_unavailable_message(model_name)
+                message = (
+                    str(exc)
+                    if isinstance(exc, TranscriptionBackendError)
+                    else whisper_model_unavailable_message(model_name, backend)
+                )
                 self.jobs.update_one(
                     {"_id": candidate["_id"], **queued_filter},
                     {
@@ -365,10 +376,13 @@ class TranscriptionWorker:
         )
         return result.modified_count == 1
 
-    def save_model_load_metadata(self, job_id: ObjectId) -> None:
+    def save_model_load_metadata(
+        self, job_id: ObjectId, *, language_code: str | None = None
+    ) -> None:
         metadata = self.adapter.last_load_metadata
         if metadata is None:
             return
+        metadata["language_code"] = language_code
         self.jobs.update_one(
             {
                 "_id": job_id,
@@ -558,7 +572,7 @@ class TranscriptionWorker:
                 compute_type,
                 cancel_callback=self.should_cancel_current_job,
             )
-            self.save_model_load_metadata(job_id)
+            self.save_model_load_metadata(job_id, language_code=job_inference.language)
             if self.should_cancel_current_job() or not self.update_progress(job_id, 30, "loading_media", "Preparing media"):
                 self.cancel_current_job()
                 return
@@ -600,7 +614,7 @@ class TranscriptionWorker:
                 condition_on_previous_text=job_inference.condition_on_previous_text,
                 no_speech_threshold=job_inference.no_speech_threshold,
             )
-            self.save_model_load_metadata(job_id)
+            self.save_model_load_metadata(job_id, language_code=job_inference.language)
             result = apply_job_output_config(result, job)
             processing_stats = result.get("_processing_stats", {})
             processing_metadata = {
@@ -643,7 +657,9 @@ class TranscriptionWorker:
 
             translated_text: str | None = None
             if is_translation:
-                if self.should_cancel_current_job() or not self.update_progress(job_id, 90, "saving_result", "Saving transcript"):
+                if self.should_cancel_current_job() or not self.update_progress(
+                    job_id, 92, "translating", "Translating transcript"
+                ):
                     self.cancel_current_job()
                     return
                 translated_text = self.translation_adapter.translate(
@@ -652,7 +668,9 @@ class TranscriptionWorker:
                     cancel_callback=self.should_cancel_current_job,
                 )
 
-            if self.should_cancel_current_job() or not self.update_progress(job_id, 90, "saving_result", "Saving transcript"):
+            if self.should_cancel_current_job() or not self.update_progress(
+                job_id, 98, "saving_result", "Saving transcript"
+            ):
                 self.cancel_current_job()
                 return
             transcript_id = self.save_transcript(
@@ -695,6 +713,16 @@ class TranscriptionWorker:
             else:
                 self.release_current_job()
                 logger.info("Released interrupted job %s", job_id)
+        except InvalidTranscriptionLanguage as exc:
+            if self.cancel_current_job():
+                logger.info("Cancelled job %s while handling invalid language", job_id)
+            elif self.fail_job(
+                job_id,
+                str(exc),
+                error_traceback=traceback.format_exc(),
+                structured_error=exc.structured_details(),
+            ):
+                logger.exception("Rejected job %s before inference: %s", job_id, exc)
         except TranscriptionBackendError as exc:
             backend, device, compute_type = self.job_backend_request(job)
             error = str(exc)

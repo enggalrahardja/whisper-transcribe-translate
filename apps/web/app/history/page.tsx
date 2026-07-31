@@ -5,6 +5,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiBaseUrl, Job, JobStatus } from "../lib/api";
 import { LiveHistory } from "../components/live-history";
 import { SubtitleHistory } from "../components/subtitle-history";
+import { languageLabel } from "../lib/languages";
 
 const pageSize = 5;
 const terminalStatuses = new Set<JobStatus>(["completed", "failed", "cancelled"]);
@@ -203,8 +204,8 @@ export default function HistoryPage() {
                     <td><strong>{job.file_name}</strong></td>
                     <td>{job.task}</td>
                     <td>
-                      {job.language === "auto" ? "Auto" : job.language}
-                      {job.task === "translate" && job.target_language ? <small>→ {job.target_language}</small> : null}
+                      {job.language_label || languageLabel(job.language)}
+                      {job.task === "translate" && job.target_language ? <small>→ {languageLabel(job.target_language)}</small> : null}
                     </td>
                     <td>{job.model}</td>
                     <td>

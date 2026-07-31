@@ -4,20 +4,27 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-WhisperModel = Literal["tiny", "base", "small", "medium", "large", "large-v3"]
+WhisperModel = Literal["tiny", "base", "small", "medium", "large", "large-v3", "turbo"]
+ModelRegistryBackend = Literal["pytorch", "faster-whisper"]
 WhisperModelStatus = Literal[
     "not_downloaded", "downloading", "available", "failed", "corrupted", "deleting"
 ]
 
 
 class WhisperModelResponse(BaseModel):
+    backend: ModelRegistryBackend = "pytorch"
     model: WhisperModel
+    backend_model_id: str
     status: WhisperModelStatus
+    storage_kind: Literal["checkpoint", "ctranslate2_directory"]
     file_name: str
     file_path: str
     expected_size_bytes: int | None
     actual_size_bytes: int | None
+    expected_checksum: str | None = None
+    checksum: str | None = None
     checksum_valid: bool | None
+    validation_status: Literal["not_verified", "valid", "invalid"] = "not_verified"
     downloaded_at: datetime | None
     last_verified_at: datetime | None
     last_error: str | None
@@ -32,11 +39,21 @@ class WhisperModelResponse(BaseModel):
 
 
 class AvailableWhisperModelResponse(BaseModel):
+    backend: ModelRegistryBackend = "pytorch"
     model: WhisperModel
     file_name: str
     file_path: str
     actual_size_bytes: int
     last_verified_at: datetime | None
+
+
+class WhisperModelActionRequest(BaseModel):
+    backend: ModelRegistryBackend
+    model: WhisperModel
+
+
+class WhisperModelScanRequest(BaseModel):
+    backend: ModelRegistryBackend
 
 
 class GeneralSettings(BaseModel):

@@ -45,6 +45,7 @@ class Settings(BaseSettings):
     retention_audit_days: int = 365
     retention_cleanup_batch_size: int = 500
     whisper_model_dir: Path = PROJECT_ROOT / "storage/models/whisper"
+    faster_whisper_model_dir: Path = PROJECT_ROOT / "storage/models/faster-whisper"
     whisper_download_timeout_seconds: float = 30.0
     whisper_download_max_retries: int = 2
     whisper_download_heartbeat_seconds: float = 5.0
@@ -138,7 +139,7 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    @field_validator("whisper_model_dir", mode="before")
+    @field_validator("whisper_model_dir", "faster_whisper_model_dir", mode="before")
     @classmethod
     def resolve_whisper_model_dir(cls, value: str | Path) -> Path:
         path = Path(value).expanduser()

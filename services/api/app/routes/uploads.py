@@ -6,6 +6,10 @@ from ..services.jobs import create_uploaded_job, resolve_job_backend_config, tra
 from ..services.media_files import create_media_file
 from ..services.storage import save_upload
 from ..services.translation_adapter import normalize_target_language
+from ..services.transcription_languages import (
+    InvalidTranscriptionLanguage,
+    normalize_transcription_language,
+)
 
 router = APIRouter(prefix="/api/uploads", tags=["uploads"])
 
@@ -14,7 +18,7 @@ router = APIRouter(prefix="/api/uploads", tags=["uploads"])
 async def upload_media(
     file: UploadFile = File(...),
     language: str = Form(default="auto"),
-    model: str = Form(default="base", pattern="^(tiny|base|small|medium|large|large-v3)$"),
+    model: str = Form(default="base", pattern="^(tiny|base|small|medium|large|large-v3|turbo)$"),
     transcription_backend: str | None = Form(default=None, pattern="^(pytorch|faster-whisper)$"),
     transcription_device: str | None = Form(default=None, pattern="^(auto|cpu|cuda)$"),
     transcription_compute_type: str | None = Form(
@@ -24,6 +28,13 @@ async def upload_media(
     target_language: str | None = Form(default=None),
     transcription_config: str | None = Form(default=None),
 ) -> JobResponse:
+    try:
+        language = normalize_transcription_language(language) or "auto"
+    except InvalidTranscriptionLanguage as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=exc.structured_details(),
+        ) from exc
     backend_config = resolve_job_backend_config(
         model, transcription_backend, transcription_device, transcription_compute_type
     )

@@ -1251,8 +1251,8 @@ export default function LivePage() {
           <label>Microphone<select disabled={!canConfigure} onChange={(event) => setSelectedMicrophone(event.target.value)} value={selectedMicrophone}><option value="">System default</option>{microphones.map((device, index) => <option key={device.deviceId} value={device.deviceId}>{device.label || `Microphone ${index + 1}`}</option>)}</select></label>
           <label>Whisper model<select disabled={!canConfigure || modelsLoading || availableModels.length === 0} onChange={(event) => setModel(event.target.value)} value={model}><option disabled value="">{modelsLoading ? "Loading models…" : "Select an available model"}</option>{availableModels.map(({ model: availableModel }) => <option key={availableModel} value={availableModel}>{availableModel}</option>)}</select></label>
         </div>
-        {!modelsLoading && availableModels.length === 0 ? <p className="error-callout" role="alert">No Whisper model is available. <Link href="/settings#whisper-models">Open Settings → Whisper Models</Link> to download one.</p> : null}
-        {modelsError ? <p className="error-callout" role="alert">{modelsError} <Link href="/settings#whisper-models">Open model settings</Link>.</p> : null}
+        {!modelsLoading && availableModels.length === 0 ? <p className="error-callout" role="alert">No Whisper model is available. <Link href="/settings#models">Open Settings → Models</Link> to download one.</p> : null}
+        {modelsError ? <p className="error-callout" role="alert">{modelsError} <Link href="/settings#models">Open model settings</Link>.</p> : null}
         {providerPrivacyWarning ? (
           <p className="error-callout" role="status">
             External transcription provider: {providerPrivacyWarning} Do not continue without approved consent.

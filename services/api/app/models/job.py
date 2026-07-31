@@ -1,7 +1,13 @@
 from datetime import datetime
 from enum import Enum
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic_core import PydanticCustomError
+
+from ..services.transcription_languages import (
+    InvalidTranscriptionLanguage,
+    normalize_transcription_language,
+)
 
 
 class VadSettings(BaseModel):
@@ -52,7 +58,7 @@ class CreateJobRequest(BaseModel):
     file_name: str = Field(min_length=1, max_length=255)
     media_type: str = Field(default="audio", pattern="^(audio|video)$")
     language: str = Field(default="auto", min_length=2, max_length=50)
-    model: str = Field(default="base", pattern="^(tiny|base|small|medium|large|large-v3)$")
+    model: str = Field(default="base", pattern="^(tiny|base|small|medium|large|large-v3|turbo)$")
     transcription_backend: str | None = Field(default=None, pattern="^(pytorch|faster-whisper)$")
     transcription_device: str | None = Field(default=None, pattern="^(auto|cpu|cuda)$")
     transcription_compute_type: str | None = Field(
@@ -61,6 +67,18 @@ class CreateJobRequest(BaseModel):
     task: str = Field(default="transcribe", pattern="^(transcribe|translate)$")
     target_language: str | None = Field(default=None, min_length=2, max_length=50)
     transcription_config: AdvancedTranscriptionSettings | None = None
+
+    @field_validator("language", mode="before")
+    @classmethod
+    def normalize_language(cls, value: object) -> str:
+        try:
+            return normalize_transcription_language(value) or "auto"
+        except InvalidTranscriptionLanguage as exc:
+            raise PydanticCustomError(
+                exc.code,
+                "Unsupported transcription language: {value}",
+                {"value": value},
+            ) from exc
 
     @model_validator(mode="after")
     def require_translate_target(self) -> "CreateJobRequest":
@@ -74,6 +92,8 @@ class JobResponse(BaseModel):
     file_name: str
     media_type: str
     language: str
+    language_label: str = "Auto Detect"
+    language_code: str | None = None
     model: str
     transcription_backend: str = "pytorch"
     transcription_device: str = "auto"

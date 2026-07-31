@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { FormEvent, useEffect, useState } from "react";
 import { apiBaseUrl, ApplicationSettings, AvailableWhisperModel, formatBytes, getAvailableWhisperModels, TranscriptionBackendName, TranscriptionCapabilities, TranscriptionComputeType, TranscriptionDeviceName, WhisperModelName } from "../lib/api";
-import { languageLabel, sourceLanguages, targetLanguages } from "../lib/languages";
+import { languageLabel, sourceLanguages, targetLanguages, transcriptionLanguageCode } from "../lib/languages";
 
 export default function TranslatePage() {
   const router = useRouter();
@@ -27,22 +27,27 @@ export default function TranslatePage() {
     Promise.all([
       fetch(`${apiBaseUrl}/api/settings`, { cache: "no-store", signal: controller.signal }),
       getAvailableWhisperModels(controller.signal),
+      getAvailableWhisperModels(controller.signal, "faster-whisper"),
       fetch(`${apiBaseUrl}/api/settings/transcription-capabilities`, { cache: "no-store", signal: controller.signal }),
-    ]).then(async ([settingsResponse, models, capabilitiesResponse]) => {
+    ]).then(async ([settingsResponse, pytorchModels, fasterModels, capabilitiesResponse]) => {
         if (!settingsResponse.ok) throw new Error("Settings could not be loaded");
         if (!capabilitiesResponse.ok) throw new Error("Transcription capabilities could not be loaded");
         const settings = await settingsResponse.json() as ApplicationSettings;
         const loadedCapabilities = await capabilitiesResponse.json() as TranscriptionCapabilities;
+        const models = settings.transcription.backend === "faster-whisper" ? fasterModels : pytorchModels;
         setAvailableModels(models);
         setCapabilities(loadedCapabilities);
         setBackend(settings.transcription.backend);
         setDevice(settings.transcription.device);
         setComputeType(settings.transcription.compute_type);
-        setSourceLanguage(settings.general.default_language);
+        setSourceLanguage(transcriptionLanguageCode(settings.general.default_language) ?? "auto");
         setTargetLanguage(settings.translation.default_target_language);
-        const selectable = settings.transcription.backend === "faster-whisper" ? loadedCapabilities.models : models.map((item) => item.model);
-        setModel(selectable.includes(settings.general.default_whisper_model)
-          ? settings.general.default_whisper_model
+        const selectable = models.map((item) => item.model);
+        const configuredModel = settings.general.default_whisper_model === "large"
+          ? "large-v3"
+          : settings.general.default_whisper_model;
+        setModel(selectable.includes(configuredModel)
+          ? configuredModel
           : selectable[0] ?? "");
       }).catch((loadError) => {
         if (loadError instanceof DOMException && loadError.name === "AbortError") return;
@@ -53,27 +58,26 @@ export default function TranslatePage() {
 
   const effectiveDevice = device === "auto" ? (capabilities?.devices.some((item) => item.id === "cuda" && item.available) ? "cuda" : "cpu") : device;
   const validComputeTypes = capabilities?.compute_types[backend]?.[effectiveDevice] ?? [];
-  const selectableModels: WhisperModelName[] = backend === "faster-whisper" ? capabilities?.models ?? [] : availableModels.map((item) => item.model);
+  const selectableModels: WhisperModelName[] = availableModels.map((item) => item.model);
 
   function updateRuntime(nextBackend: TranscriptionBackendName, nextDevice: TranscriptionDeviceName) {
     setBackend(nextBackend);
+    void getAvailableWhisperModels(undefined, nextBackend).then((models) => {
+      setAvailableModels(models);
+      setModel((current) => models.some((item) => item.model === current) ? current : models[0]?.model ?? "");
+    }).catch((loadError) => setModelsError(loadError instanceof Error ? loadError.message : "Available Whisper models could not be loaded"));
     setDevice(nextDevice);
     const resolvedDevice = nextDevice === "auto" ? (capabilities?.devices.some((item) => item.id === "cuda" && item.available) ? "cuda" : "cpu") : nextDevice;
     const valid = capabilities?.compute_types[nextBackend]?.[resolvedDevice] ?? [];
     if (nextBackend === "faster-whisper" && resolvedDevice === "cuda" && valid.includes("int8_float16") && computeType === "auto") setComputeType("int8_float16");
     else if (computeType !== "auto" && !valid.includes(computeType)) setComputeType(valid[0] ?? "auto");
-    const nextModels = nextBackend === "faster-whisper" ? capabilities?.models ?? [] : availableModels.map((item) => item.model);
-    setModel((current) => {
-      const compatible = nextBackend === "faster-whisper" && current === "large" ? "large-v3" : nextBackend === "pytorch" && current === "large-v3" ? "large" : current;
-      return nextModels.includes(compatible as WhisperModelName) ? compatible : nextModels[0] ?? "";
-    });
   }
 
   useEffect(() => {
     const controller = new AbortController();
-    const refreshModels = () => void getAvailableWhisperModels(controller.signal).then((models) => {
+    const refreshModels = () => void getAvailableWhisperModels(controller.signal, backend).then((models) => {
       setAvailableModels(models);
-      if (backend === "pytorch") setModel((current) => models.some((item) => item.model === current) ? current : "");
+      setModel((current) => models.some((item) => item.model === current) ? current : "");
     }).catch(() => undefined);
     window.addEventListener("focus", refreshModels);
     return () => {
@@ -163,8 +167,8 @@ export default function TranslatePage() {
             </label>
           </div>
 
-          {!modelsLoading && backend === "pytorch" && availableModels.length === 0 ? <p className="error-callout" role="alert">No Whisper model is available. <Link href="/settings#whisper-models">Open Settings → Whisper Models</Link> to download one.</p> : null}
-          {modelsError ? <p className="error-callout" role="alert">{modelsError} <Link href="/settings#whisper-models">Open model settings</Link>.</p> : null}
+          {!modelsLoading && availableModels.length === 0 ? <p className="error-callout" role="alert">No Whisper model is available for {backend}. <Link href="/settings#models">Open Settings → Models</Link> to download one.</p> : null}
+          {modelsError ? <p className="error-callout" role="alert">{modelsError} <Link href="/settings#models">Open model settings</Link>.</p> : null}
 
           {file ? (
             <dl className="upload-summary">

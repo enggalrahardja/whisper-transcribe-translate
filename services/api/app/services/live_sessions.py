@@ -7,6 +7,7 @@ from pymongo import ASCENDING, DESCENDING, ReturnDocument
 from ..database import get_database
 from ..models.live import CreateLiveSessionRequest, LiveSessionResponse
 from .whisper_models import whisper_model_usage
+from .transcription_languages import normalize_transcription_language
 
 COLLECTION_NAME = "live_sessions"
 
@@ -52,13 +53,14 @@ def _get_document(session_id: str) -> dict:
 
 
 def create_live_session(payload: CreateLiveSessionRequest, *, owner_id: str = "development-user") -> LiveSessionResponse:
+    language_code = normalize_transcription_language(payload.language)
     with whisper_model_usage(payload.model, "live-session-create"):
         now = utc_now()
         document = {
             "session_id": uuid4().hex,
             "owner_id": owner_id,
             "status": "active",
-            "language": payload.language.strip().lower(),
+            "language": language_code or "auto",
             "model": payload.model,
             "started_at": now,
             "ended_at": None,

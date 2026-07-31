@@ -20,7 +20,7 @@ test("UI includes contextual large-v3 guidance", () => {
   assert.match(transcribeSource, /Recommended for 8 GB VRAM/);
   assert.match(transcribeSource, /large-v3 with Whisper PyTorch requires substantial VRAM/);
   assert.match(settingsSource, /Unavailable/);
-  assert.match(transcribeSource, /current === "large" \? "large-v3"/);
+  assert.match(transcribeSource, /getAvailableWhisperModels\(undefined, nextBackend\)/);
 });
 
 test("job detail distinguishes requested and active runtime", () => {

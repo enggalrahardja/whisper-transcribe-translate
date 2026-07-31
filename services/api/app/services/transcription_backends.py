@@ -16,9 +16,11 @@ import torch
 
 from .whisper_adapter import WhisperAdapter
 from .cuda12_runtime import Cuda12Runtime, Cuda12RuntimeFailure, activate_faster_whisper_cuda
+from .whisper_models import resolve_available_whisper_model_path
+from .transcription_languages import normalize_transcription_language
 
 BACKENDS = ("pytorch", "faster-whisper")
-MODELS = ("tiny", "base", "small", "medium", "large-v3")
+MODELS = ("tiny", "base", "small", "medium", "large-v3", "turbo")
 LEGACY_MODEL_ALIASES = {"large": "large-v3"}
 COMPUTE_MATRIX = {
     "pytorch": {
@@ -89,7 +91,7 @@ class BackendConfig:
 
 @dataclass(frozen=True)
 class TranscriptionOptions:
-    language: str
+    language: str | None
     beam_size: int = 5
     best_of: int | None = None
     temperature: float = 0.0
@@ -253,10 +255,11 @@ class PytorchWhisperBackend:
     def transcribe(self, audio_path: Path, options: TranscriptionOptions) -> dict:
         if self.adapter is None or self.config is None:
             raise RuntimeError("PyTorch Whisper model is not loaded")
+        language_code = normalize_transcription_language(options.language)
         return self.adapter.transcribe(
             audio_path,
             model_name=pytorch_model_name(self.config.model),
-            language=options.language,
+            language=language_code,
             progress_callback=options.progress_callback,
             cancel_callback=options.cancel_callback,
             fp16=self.config.compute_type == "float16",
@@ -308,8 +311,11 @@ class FasterWhisperBackend:
                 "dependency_unavailable", "faster-whisper is not installed", stage="load"
             ) from exc
         try:
+            model_directory = resolve_available_whisper_model_path(
+                config.model, backend="faster-whisper"
+            )
             self.model = WhisperModel(
-                config.model,
+                str(model_directory),
                 device=config.device,
                 compute_type=config.compute_type,
             )
@@ -344,8 +350,9 @@ class FasterWhisperBackend:
             raise RuntimeError("faster-whisper model is not loaded")
         if options.cancel_callback and options.cancel_callback():
             raise InterruptedError("Transcription was interrupted")
+        language_code = normalize_transcription_language(options.language)
         kwargs: dict[str, object] = {
-            "language": None if options.language == "auto" else options.language,
+            "language": language_code,
             "task": "transcribe",
             "beam_size": options.beam_size,
             "temperature": options.temperature,
@@ -359,6 +366,8 @@ class FasterWhisperBackend:
         try:
             segment_iterator, info = self.model.transcribe(str(audio_path), **kwargs)
             normalized_segments: list[dict[str, object]] = []
+            duration = float(getattr(info, "duration", 0.0) or 0.0)
+            last_progress = 0
             for index, segment in enumerate(segment_iterator):
                 if options.cancel_callback and options.cancel_callback():
                     raise InterruptedError("Transcription was interrupted")
@@ -388,6 +397,16 @@ class FasterWhisperBackend:
                 if words is not None:
                     normalized["words"] = words
                 normalized_segments.append(normalized)
+                if options.progress_callback:
+                    if duration > 0:
+                        segment_progress = min(
+                            99, max(1, int(float(segment.end) * 100 / duration))
+                        )
+                    else:
+                        segment_progress = min(99, index + 1)
+                    if segment_progress > last_progress:
+                        options.progress_callback(segment_progress)
+                        last_progress = segment_progress
             if options.progress_callback:
                 options.progress_callback(100)
         except Exception as exc:
@@ -590,10 +609,11 @@ class TranscriptionBackendManager:
         **kwargs: object,
     ) -> dict:
         with self._operation_lock:
+            language_code = normalize_transcription_language(kwargs.get("language"))
             self.load_model(backend, model_name, device, compute_type, kwargs.get("cancel_callback"))
             assert self._backend is not None
             options = TranscriptionOptions(
-                language=str(kwargs.get("language", "auto")),
+                language=language_code,
                 beam_size=int(kwargs.get("beam_size") or 5),
                 best_of=kwargs.get("best_of") if isinstance(kwargs.get("best_of"), int) else None,
                 temperature=float(kwargs.get("temperature") or 0.0),
@@ -605,6 +625,7 @@ class TranscriptionBackendManager:
                 cancel_callback=kwargs.get("cancel_callback") if callable(kwargs.get("cancel_callback")) else None,
             )
             self._metadata["model_status"] = "running"
+            self._metadata["language_code"] = options.language
             started = monotonic()
             try:
                 result = self._backend.transcribe(audio_path, options)

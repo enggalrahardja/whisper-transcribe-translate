@@ -89,6 +89,11 @@ button, input, select { font: inherit; }
 :root[data-theme="dark"] .whisper-model-card,
 :root[data-theme="dark"] .model-loading { border-color: #343a52; color: #edf0fa; background: #151a2c; }
 :root[data-theme="dark"] .model-actions button { border-color: #4b5372; color: #c7c2ff; background: #1b2033; }
+:root[data-theme="dark"] .local-files-table-wrap { border-color: #343a52; }
+:root[data-theme="dark"] .local-files-table th, :root[data-theme="dark"] .local-files-empty { color: #b9c0d8; background: #151a2c; }
+:root[data-theme="dark"] .local-files-table th, :root[data-theme="dark"] .local-files-table td { border-color: #343a52; }
+:root[data-theme="dark"] .local-files-table td, :root[data-theme="dark"] .local-files-table td:first-child { color: #edf0fa; }
+:root[data-theme="dark"] .local-files-table button { background: #1b2033; }
 :root[data-theme="dark"] .model-path code { color: #cbd1e3; }
 :root[data-theme="dark"] h1,
 :root[data-theme="dark"] h2,
@@ -371,6 +376,25 @@ header p, .service-card p, .jobs-panel p { color: #687086; }
 .storage-summary > div, .job-count-grid > div { min-width: 0; display: grid; gap: 5px; padding: 13px; border-radius: 11px; background: #fafbfe; }
 .storage-summary span, .job-count-grid span { color: #737b91; font-size: 10px; font-weight: 800; text-transform: uppercase; }
 .storage-summary strong, .job-count-grid strong { overflow-wrap: anywhere; font-size: 18px; }
+.local-files-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; margin: 26px 0 12px; }
+.local-files-heading h3, .local-files-heading p { margin: 0; }
+.local-files-heading p { margin-top: 5px; color: #737b91; font-size: 12px; }
+.local-files-heading > span { flex: none; color: #737b91; font-size: 12px; font-weight: 700; }
+.local-files-table-wrap { overflow-x: auto; border: 1px solid #e4e7ef; border-radius: 12px; }
+.local-files-table { width: 100%; min-width: 820px; border-collapse: collapse; }
+.local-files-table th, .local-files-table td { padding: 12px 11px; border-bottom: 1px solid #eaecf2; text-align: left; vertical-align: top; }
+.local-files-table tbody tr:last-child td { border-bottom: 0; }
+.local-files-table th { color: #737b91; background: #fafbfe; font-size: 10px; letter-spacing: .05em; text-transform: uppercase; }
+.local-files-table td { color: #4a5268; font-size: 12px; }
+.local-files-table td:first-child { max-width: 240px; overflow-wrap: anywhere; color: #252d43; font-weight: 700; }
+.local-files-table td small { display: block; margin-top: 4px; max-width: 220px; color: #82899c; }
+.local-files-table button { padding: 7px 10px; border: 1px solid #efc2c2; border-radius: 8px; color: #a23c3c; background: #fff; font-size: 11px; font-weight: 700; cursor: pointer; }
+.local-files-table button:disabled { cursor: not-allowed; opacity: .45; }
+.local-files-empty { padding: 18px; border-radius: 11px; color: #737b91; background: #fafbfe; text-align: center; }
+.previous-storage-locations { margin-top: 14px; color: #596176; font-size: 12px; }
+.previous-storage-locations summary { font-weight: 700; cursor: pointer; }
+.previous-storage-locations ul { margin: 9px 0 0; padding-left: 22px; }
+.previous-storage-locations code { overflow-wrap: anywhere; }
 .cleanup-summary, .runtime-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 11px; margin: 20px 0 0; }
 .cleanup-summary > div, .runtime-grid > div { min-width: 0; padding: 12px; border: 1px solid #e8eaf1; border-radius: 10px; }
 .cleanup-summary dt, .runtime-grid dt { margin-bottom: 5px; color: #737b91; font-size: 10px; font-weight: 800; text-transform: uppercase; }

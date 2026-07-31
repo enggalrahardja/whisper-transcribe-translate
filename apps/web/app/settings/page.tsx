@@ -6,10 +6,12 @@ import {
   ApplicationSettings,
   cancelWhisperModelDownload,
   CleanupResult,
+  DeleteLocalFileResult,
   deleteWhisperModel,
   downloadWhisperModel,
   formatBytes,
   getWhisperModels,
+  LocalFile,
   retryWhisperModelDownload,
   scanWhisperModels,
   SettingsRuntime,
@@ -80,6 +82,9 @@ export default function SettingsPage() {
   const [modelFeedback, setModelFeedback] = useState<Feedback>(null);
   const [feedback, setFeedback] = useState<Feedback>(null);
   const [cleanupResult, setCleanupResult] = useState<CleanupResult | null>(null);
+  const [localFiles, setLocalFiles] = useState<LocalFile[]>([]);
+  const [localFilesLoading, setLocalFilesLoading] = useState(true);
+  const [deletingLocalFile, setDeletingLocalFile] = useState<string | null>(null);
   const modelRefreshInFlight = useRef<Promise<void> | null>(null);
   const mounted = useRef(true);
 
@@ -106,6 +111,19 @@ export default function SettingsPage() {
     }
   }, []);
 
+  const loadLocalFiles = useCallback(async (signal?: AbortSignal) => {
+    try {
+      const response = await fetch(`${apiBaseUrl}/api/settings/local-files`, { cache: "no-store", signal });
+      if (!response.ok) throw new Error(await responseError(response, "Local files could not be loaded"));
+      setLocalFiles(await response.json() as LocalFile[]);
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      setFeedback({ type: "error", message: error instanceof Error ? error.message : "Local files could not be loaded" });
+    } finally {
+      setLocalFilesLoading(false);
+    }
+  }, []);
+
   useEffect(() => {
     const controller = new AbortController();
     Promise.all([
@@ -126,6 +144,12 @@ export default function SettingsPage() {
     }).finally(() => setLoading(false));
     return () => controller.abort();
   }, []);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void loadLocalFiles(controller.signal);
+    return () => controller.abort();
+  }, [loadLocalFiles]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -219,10 +243,31 @@ export default function SettingsPage() {
       setFeedback({ type: "success", message: `Settings saved as version ${updated.version}. Runtime-safe values will apply within a few seconds.` });
       applyThemePreference(updated.general.theme_preference);
       void loadRuntime();
+      void loadLocalFiles();
     } catch (error) {
       setFeedback({ type: "error", message: error instanceof Error ? error.message : "Settings could not be saved" });
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function removeLocalFile(file: LocalFile) {
+    const usage = file.job_count ? ` Transcript/job metadata (${file.job_count} job) will be retained.` : "";
+    if (!window.confirm(`Delete local file “${file.original_name}” and reclaim ${formatBytes(file.file_size)}?${usage} This cannot be undone.`)) return;
+    setDeletingLocalFile(file.id);
+    setFeedback(null);
+    try {
+      const response = await fetch(`${apiBaseUrl}/api/settings/local-files/${file.id}`, { method: "DELETE" });
+      if (!response.ok) throw new Error(await responseError(response, "Local file could not be deleted"));
+      const result = await response.json() as DeleteLocalFileResult;
+      setLocalFiles((current) => current.filter((item) => item.id !== file.id));
+      setFeedback({ type: "success", message: `Deleted ${result.original_name} and reclaimed ${formatBytes(result.bytes_deleted)}.` });
+      void loadRuntime();
+    } catch (error) {
+      setFeedback({ type: "error", message: error instanceof Error ? error.message : "Local file could not be deleted" });
+      void loadLocalFiles();
+    } finally {
+      setDeletingLocalFile(null);
     }
   }
 
@@ -245,6 +290,7 @@ export default function SettingsPage() {
         message: `Cleanup reclaimed ${formatBytes(result.bytes_reclaimed)} and removed ${result.media_files_deleted + result.export_files_deleted + result.orphan_files_deleted} file(s).`,
       });
       void loadRuntime();
+      void loadLocalFiles();
     } catch (error) {
       setFeedback({ type: "error", message: error instanceof Error ? error.message : "Cleanup could not be completed" });
     } finally {
@@ -521,13 +567,33 @@ export default function SettingsPage() {
             <div><span>Total usage</span><strong>{formatBytes(runtime?.storage_usage.total_bytes)}</strong></div><div><span>Uploads</span><strong>{formatBytes(runtime?.storage_usage.uploads_bytes)}</strong></div><div><span>Exports</span><strong>{formatBytes(runtime?.storage_usage.exports_bytes)}</strong></div><div><span>Files</span><strong>{runtime?.storage_usage.file_count ?? "—"}</strong></div>
           </div>
           <div className="settings-grid">
+            <label className="settings-wide">Storage location<input disabled={disabled} placeholder="/absolute/path/to/storage" value={draft.storage_retention.storage_location} onChange={(event) => update("storage_retention", "storage_location", event.target.value)} /><small>Absolute server path. New uploads and exports use this location; existing files remain readable in their previous locations.</small></label>
             <label>Upload maximum size (MB)<input disabled={disabled} min="1" max="10240" type="number" value={draft.storage_retention.upload_max_size_mb} onChange={(event) => update("storage_retention", "upload_max_size_mb", Number(event.target.value))} /></label>
             <label className="settings-wide">Allowed extensions<input disabled={disabled} value={draft.storage_retention.allowed_extensions.join(", ")} onChange={(event) => update("storage_retention", "allowed_extensions", event.target.value.split(",").map((item) => item.trim()).filter(Boolean))} /><small>Comma-separated, including the leading dot.</small></label>
             <label>Media retention (days)<input disabled={disabled} min="1" max="3650" type="number" value={draft.storage_retention.media_retention_days} onChange={(event) => update("storage_retention", "media_retention_days", Number(event.target.value))} /></label>
             <label>Export retention (days)<input disabled={disabled} min="1" max="3650" type="number" value={draft.storage_retention.export_retention_days} onChange={(event) => update("storage_retention", "export_retention_days", Number(event.target.value))} /></label>
             <label className="toggle-field"><input checked={draft.storage_retention.cleanup_enabled} disabled={disabled} type="checkbox" onChange={(event) => update("storage_retention", "cleanup_enabled", event.target.checked)} />Enable scheduled retention cleanup</label>
           </div>
+          {draft.storage_retention.previous_storage_locations.length ? <details className="previous-storage-locations"><summary>Previous storage locations</summary><ul>{draft.storage_retention.previous_storage_locations.map((location) => <li key={location}><code>{location}</code></li>)}</ul></details> : null}
           {cleanupResult ? <dl className="cleanup-summary"><div><dt>Media removed</dt><dd>{cleanupResult.media_files_deleted}</dd></div><div><dt>Exports removed</dt><dd>{cleanupResult.export_files_deleted}</dd></div><div><dt>Orphans removed</dt><dd>{cleanupResult.orphan_files_deleted}</dd></div><div><dt>Active protected</dt><dd>{cleanupResult.protected_active_files}</dd></div><div><dt>Projects protected</dt><dd>{cleanupResult.protected_project_files}</dd></div></dl> : null}
+          <div className="local-files-heading"><div><h3>Local Files</h3><p>Uploaded media stored on this device. Deleting a file keeps its completed transcript and job metadata.</p></div><span>{localFiles.length} file(s)</span></div>
+          {localFilesLoading ? <p className="local-files-empty">Loading local files…</p> : localFiles.length ? (
+            <div className="local-files-table-wrap">
+              <table className="local-files-table">
+                <thead><tr><th>File</th><th>Type</th><th>Size</th><th>Created</th><th>Usage</th><th>Action</th></tr></thead>
+                <tbody>{localFiles.map((file) => (
+                  <tr key={file.id}>
+                    <td>{file.original_name}</td>
+                    <td>{file.media_type}<small>{file.content_type ?? "Unknown content type"}</small></td>
+                    <td>{formatBytes(file.file_size)}</td>
+                    <td>{dateTime(file.created_at)}</td>
+                    <td>{file.active_job_count ? `${file.active_job_count} active job(s)` : file.subtitle_project_count ? `${file.subtitle_project_count} subtitle project(s)` : file.job_count ? `${file.job_count} job(s)` : "Unused"}{file.protection_reason ? <small>{file.protection_reason}</small> : null}</td>
+                    <td><button className="danger" disabled={disabled || deletingLocalFile === file.id || !file.deletable} onClick={() => removeLocalFile(file)} title={file.protection_reason ?? `Delete ${file.original_name}`} type="button">{deletingLocalFile === file.id ? "Deleting…" : "Delete"}</button></td>
+                  </tr>
+                ))}</tbody>
+              </table>
+            </div>
+          ) : <p className="local-files-empty">No uploaded local files.</p>}
         </section>
 
         <section aria-labelledby="settings-tab-worker_processing" className="settings-card" hidden={activeTab !== "worker_processing"} id="settings-panel-worker_processing" role="tabpanel">

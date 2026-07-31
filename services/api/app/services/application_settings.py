@@ -1,3 +1,4 @@
+import os
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -39,9 +40,68 @@ def utc_now() -> datetime:
 def _defaults() -> ApplicationSettingsValues:
     environment = get_settings()
     values = ApplicationSettingsValues()
+    values.storage_retention.storage_location = str(Path(environment.storage_root).expanduser().resolve())
     values.worker_processing.polling_interval_seconds = environment.worker_poll_interval_seconds
     values.worker_processing.stale_heartbeat_threshold_seconds = environment.worker_stale_after_seconds
     return values
+
+
+def effective_storage_roots(storage_settings=None) -> tuple[Path, ...]:
+    environment_root = Path(get_settings().storage_root).expanduser().resolve()
+    selected = storage_settings or get_application_settings().storage_retention
+    candidates = [selected.storage_location, *selected.previous_storage_locations, str(environment_root)]
+    roots: list[Path] = []
+    for value in candidates:
+        if not value:
+            continue
+        root = Path(value).expanduser().resolve()
+        if root not in roots:
+            roots.append(root)
+    return tuple(roots or [environment_root])
+
+
+def effective_storage_root(storage_settings=None) -> Path:
+    return effective_storage_roots(storage_settings)[0]
+
+
+def _prepare_storage_locations(values: ApplicationSettingsValues, current: dict | None) -> None:
+    storage = values.storage_retention
+    requested = Path(storage.storage_location or get_settings().storage_root).expanduser()
+    if not requested.is_absolute():
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Storage location must be an absolute path")
+    root = requested.resolve()
+    if root == Path(root.anchor):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Filesystem root cannot be used as storage location")
+
+    current_storage = (current or {}).get("storage_retention") or {}
+    previous = [
+        Path(value).expanduser().resolve()
+        for value in current_storage.get("previous_storage_locations", [])
+        if value
+    ]
+    current_location = current_storage.get("storage_location")
+    if current_location:
+        old_root = Path(current_location).expanduser().resolve()
+        if old_root != root and old_root not in previous:
+            previous.append(old_root)
+    environment_root = Path(get_settings().storage_root).expanduser().resolve()
+    comparison_roots = [*previous, environment_root]
+    for other in comparison_roots:
+        if other == root:
+            continue
+        if root.is_relative_to(other) or other.is_relative_to(root):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Storage location must not overlap existing storage root: {other}",
+            )
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=f"Storage location could not be created: {exc}") from exc
+    if not root.is_dir() or not os.access(root, os.W_OK | os.X_OK):
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="Storage location is not writable")
+    storage.storage_location = str(root)
+    storage.previous_storage_locations = [str(path) for path in previous if path != root][:20]
 
 
 def _response(document: dict) -> ApplicationSettingsResponse:
@@ -70,6 +130,13 @@ def ensure_application_settings() -> ApplicationSettingsResponse:
         },
         upsert=True,
     )
+    collection.update_one(
+        {"_id": ACTIVE_DOCUMENT_ID, "storage_retention.storage_location": {"$exists": False}},
+        {"$set": {
+            "storage_retention.storage_location": str(Path(get_settings().storage_root).expanduser().resolve()),
+            "storage_retention.previous_storage_locations": [],
+        }},
+    )
     document = collection.find_one({"_id": ACTIVE_DOCUMENT_ID})
     if document is None:
         raise RuntimeError("Active application settings could not be initialized")
@@ -97,12 +164,13 @@ def invalidate_settings_cache() -> None:
 def update_application_settings(payload: UpdateApplicationSettingsRequest) -> ApplicationSettingsResponse:
     values = ApplicationSettingsValues.model_validate(payload.model_dump(exclude={"version"}))
     collection = get_database()[COLLECTION_NAME]
-    current = collection.find_one({"_id": ACTIVE_DOCUMENT_ID}, {"version": 1})
+    current = collection.find_one({"_id": ACTIVE_DOCUMENT_ID})
     if current is not None and current.get("version") != payload.version:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"Version conflict: current version is {current['version']}",
         )
+    _prepare_storage_locations(values, current)
     if not is_whisper_model_available(values.general.default_whisper_model):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -141,10 +209,11 @@ def update_application_settings(payload: UpdateApplicationSettingsRequest) -> Ap
 
 
 def storage_usage_summary() -> StorageUsageSummary:
-    root = Path(get_settings().storage_root).resolve()
     totals = {"uploads": 0, "exports": 0, "other": 0}
     count = 0
-    if root.is_dir():
+    for root in effective_storage_roots():
+        if not root.is_dir():
+            continue
         for path in root.rglob("*"):
             try:
                 resolved = path.resolve()
@@ -205,18 +274,18 @@ def get_runtime_status() -> WorkerRuntimeResponse:
     )
 
 
-def _safe_file(path_value: str | Path, root: Path) -> Path | None:
+def _safe_file(path_value: str | Path, roots: tuple[Path, ...]) -> Path | None:
     try:
         path = Path(path_value).resolve()
     except (OSError, RuntimeError):
         return None
-    return path if path.is_relative_to(root) and path.is_file() else None
+    return path if any(path.is_relative_to(root) for root in roots) and path.is_file() else None
 
 
 def run_retention_cleanup() -> CleanupResponse:
     database = get_database()
     settings = get_application_settings(force=True).storage_retention
-    root = Path(get_settings().storage_root).resolve()
+    roots = effective_storage_roots(settings)
     now = utc_now()
     media_cutoff = now - timedelta(days=settings.media_retention_days)
     export_cutoff = now - timedelta(days=settings.export_retention_days)
@@ -236,7 +305,7 @@ def run_retention_cleanup() -> CleanupResponse:
     referenced_paths: set[Path] = set()
     for media in media_collection.find({}, {"stored_path": 1}):
         if media.get("stored_path"):
-            path = _safe_file(media["stored_path"], root)
+            path = _safe_file(media["stored_path"], roots)
             if path:
                 referenced_paths.add(path)
 
@@ -248,7 +317,7 @@ def run_retention_cleanup() -> CleanupResponse:
         if media_id in project_media_ids:
             result.protected_project_files += 1
             continue
-        path = _safe_file(media.get("stored_path", ""), root)
+        path = _safe_file(media.get("stored_path", ""), roots)
         try:
             size = path.stat().st_size if path else 0
             deleted = media_collection.delete_one({"_id": media_id, "created_at": {"$lt": media_cutoff}})
@@ -262,7 +331,7 @@ def run_retention_cleanup() -> CleanupResponse:
 
     burns = database["subtitle_burn_jobs"]
     for burn in burns.find({"status": "completed", "completed_at": {"$lt": export_cutoff}, "output_path": {"$ne": None}}):
-        path = _safe_file(burn.get("output_path", ""), root)
+        path = _safe_file(burn.get("output_path", ""), roots)
         try:
             size = path.stat().st_size if path else 0
             updated = burns.update_one(
@@ -277,10 +346,12 @@ def run_retention_cleanup() -> CleanupResponse:
         except OSError as exc:
             result.errors.append(f"Export {burn.get('burn_id')}: {exc}")
 
-    uploads = root / "uploads"
-    if uploads.is_dir():
+    for root in roots:
+        uploads = root / "uploads"
+        if not uploads.is_dir():
+            continue
         for candidate in uploads.iterdir():
-            path = _safe_file(candidate, root)
+            path = _safe_file(candidate, roots)
             if not path or path in referenced_paths:
                 continue
             try:

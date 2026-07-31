@@ -8,7 +8,6 @@ from fastapi import HTTPException, status
 from pymongo import ASCENDING, DESCENDING, ReturnDocument
 from pymongo.errors import DuplicateKeyError
 
-from ..config import get_settings
 from ..database import get_database
 from ..models.subtitle import SubtitleBurnResponse
 from .subtitle_projects import (
@@ -18,6 +17,7 @@ from .subtitle_projects import (
     render_subtitle,
     safe_export_name,
 )
+from .application_settings import effective_storage_root, effective_storage_roots
 
 
 def utc_now() -> datetime:
@@ -123,7 +123,7 @@ def process_subtitle_burn(burn_id: str) -> None:
     try:
         project = get_subtitle_document(burn["project_id"])
         _, input_path = get_project_media(burn["project_id"])
-        exports_directory = Path(get_settings().storage_root).resolve() / "exports"
+        exports_directory = effective_storage_root() / "exports"
         exports_directory.mkdir(parents=True, exist_ok=True)
         output_name = safe_export_name(project["file_name"], project["project_id"], "mp4")
         output_path = exports_directory / output_name
@@ -188,8 +188,7 @@ def get_burn_output(burn_id: str) -> tuple[dict, Path]:
     if burn["status"] != "completed" or not burn.get("output_path"):
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Burned subtitle output is not available")
     output_path = Path(burn["output_path"])
-    storage_root = Path(get_settings().storage_root).resolve()
     resolved_path = output_path.resolve()
-    if not resolved_path.is_relative_to(storage_root) or not resolved_path.is_file():
+    if not any(resolved_path.is_relative_to(root) for root in effective_storage_roots()) or not resolved_path.is_file():
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Burned subtitle output is missing")
     return burn, resolved_path

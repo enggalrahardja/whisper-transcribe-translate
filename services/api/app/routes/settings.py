@@ -6,6 +6,8 @@ from ..models.settings import (
     ApplicationSettingsResponse,
     AvailableWhisperModelResponse,
     CleanupResponse,
+    DeleteLocalFileResponse,
+    LocalFileResponse,
     UpdateApplicationSettingsRequest,
     WhisperModel,
     WhisperModelResponse,
@@ -17,6 +19,7 @@ from ..services.application_settings import (
     run_retention_cleanup,
     update_application_settings,
 )
+from ..services.media_files import delete_local_file, list_local_files
 from ..services.whisper_models import (
     WhisperModelActionConflict,
     cancel_whisper_model_download,
@@ -70,6 +73,26 @@ def get_runtime() -> WorkerRuntimeResponse:
 @router.post("/cleanup", response_model=CleanupResponse)
 def cleanup() -> CleanupResponse:
     return run_retention_cleanup()
+
+
+@router.get("/local-files", response_model=list[LocalFileResponse])
+def get_local_files() -> list[LocalFileResponse]:
+    return list_local_files()
+
+
+@router.delete("/local-files/{media_file_id}", response_model=DeleteLocalFileResponse)
+def remove_local_file(
+    media_file_id: str,
+    principal: Principal = Depends(require_principal),
+) -> DeleteLocalFileResponse:
+    require_admin(principal)
+    result = delete_local_file(media_file_id)
+    audit_event(
+        "local_file_delete",
+        principal=principal,
+        metadata={"mediaFileId": result.id, "fileName": result.original_name, "bytesDeleted": result.bytes_deleted},
+    )
+    return result
 
 
 @router.get("/models", response_model=list[WhisperModelResponse])

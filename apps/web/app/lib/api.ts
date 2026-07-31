@@ -237,6 +237,8 @@ export type ApplicationSettings = {
     default_live_model: WhisperModelName;
   };
   storage_retention: {
+    storage_location: string;
+    previous_storage_locations: string[];
     upload_max_size_mb: number;
     allowed_extensions: string[];
     media_retention_days: number;
@@ -283,6 +285,26 @@ export type CleanupResult = {
   protected_active_files: number;
   protected_project_files: number;
   errors: string[];
+};
+
+export type LocalFile = {
+  id: string;
+  original_name: string;
+  media_type: string;
+  content_type: string | null;
+  file_size: number;
+  created_at: string;
+  job_count: number;
+  active_job_count: number;
+  subtitle_project_count: number;
+  deletable: boolean;
+  protection_reason: string | null;
+};
+
+export type DeleteLocalFileResult = {
+  id: string;
+  original_name: string;
+  bytes_deleted: number;
 };
 
 async function modelRegistryRequest(

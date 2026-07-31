@@ -90,6 +90,8 @@ class LiveTranscriptionSettings(BaseModel):
 
 
 class StorageRetentionSettings(BaseModel):
+    storage_location: str = Field(default="", max_length=4096)
+    previous_storage_locations: list[str] = Field(default_factory=list, max_length=20)
     upload_max_size_mb: int = Field(default=512, ge=1, le=10240)
     allowed_extensions: list[str] = Field(
         default_factory=lambda: [".wav", ".mp3", ".ogg", ".flac", ".m4a", ".mp4", ".mov", ".wmv", ".avi", ".mkv"],
@@ -176,3 +178,23 @@ class CleanupResponse(BaseModel):
     protected_active_files: int
     protected_project_files: int
     errors: list[str]
+
+
+class LocalFileResponse(BaseModel):
+    id: str
+    original_name: str
+    media_type: str
+    content_type: str | None
+    file_size: int
+    created_at: datetime
+    job_count: int
+    active_job_count: int
+    subtitle_project_count: int
+    deletable: bool
+    protection_reason: str | None
+
+
+class DeleteLocalFileResponse(BaseModel):
+    id: str
+    original_name: str
+    bytes_deleted: int

@@ -37,6 +37,7 @@ export default function TranscribePage() {
   const [modelsError, setModelsError] = useState("");
   const [glossaries, setGlossaries] = useState<GlossaryOption[]>([]);
   const [advanced, setAdvanced] = useState<AdvancedTranscriptionSettings>(initialAdvancedSettings);
+  const [uploadMaxSizeBytes, setUploadMaxSizeBytes] = useState<number | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [message, setMessage] = useState("");
 
@@ -50,6 +51,7 @@ export default function TranscribePage() {
         if (!settingsResponse.ok) throw new Error("Settings could not be loaded");
         if (!glossariesResponse.ok) throw new Error("Glossaries could not be loaded");
         const settings = await settingsResponse.json() as ApplicationSettings;
+        setUploadMaxSizeBytes(settings.storage_retention.upload_max_size_mb * 1024 * 1024);
         setGlossaries(await glossariesResponse.json() as GlossaryOption[]);
         setAvailableModels(models);
         setLanguage("indonesian");
@@ -102,6 +104,10 @@ export default function TranscribePage() {
       setMessage("Select an available Whisper model first.");
       return;
     }
+    if (uploadMaxSizeBytes !== null && file.size > uploadMaxSizeBytes) {
+      setMessage(`File ${formatBytes(file.size)} exceeds the configured upload limit of ${formatBytes(uploadMaxSizeBytes)}.`);
+      return;
+    }
 
     setSubmitting(true);
     setMessage("");
@@ -148,7 +154,14 @@ export default function TranscribePage() {
               name="file"
               disabled={submitting}
               onChange={(event) => {
-                setFile(event.target.files?.[0] ?? null);
+                const selectedFile = event.target.files?.[0] ?? null;
+                if (selectedFile && uploadMaxSizeBytes !== null && selectedFile.size > uploadMaxSizeBytes) {
+                  setFile(null);
+                  setMessage(`File ${formatBytes(selectedFile.size)} exceeds the configured upload limit of ${formatBytes(uploadMaxSizeBytes)}.`);
+                  event.target.value = "";
+                  return;
+                }
+                setFile(selectedFile);
                 setMessage("");
               }}
               type="file"

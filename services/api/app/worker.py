@@ -5,6 +5,7 @@ import socket
 import threading
 import traceback
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from time import monotonic
 
 from bson import ObjectId
@@ -30,6 +31,7 @@ from .services.dependency_compatibility import (
     validate_worker_dependencies,
     worker_dependency_versions,
 )
+from .services.worker_instance_lock import WorkerInstanceAlreadyRunning, WorkerInstanceLock
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("transcription-worker")
@@ -358,11 +360,21 @@ class TranscriptionWorker:
 
     @staticmethod
     def cuda_oom_message(model_name: str) -> str:
+        model_order = ["tiny", "base", "small", "medium", "large"]
+        normalized_model = model_name.lower()
+        if normalized_model in model_order:
+            smaller_models = list(reversed(model_order[:model_order.index(normalized_model)]))
+        else:
+            smaller_models = ["small", "base", "tiny"]
+        if smaller_models:
+            choices = ", ".join(smaller_models[:-1]) + (f", or {smaller_models[-1]}" if len(smaller_models) > 1 else smaller_models[0])
+            recommendation = f"Select a smaller Whisper model ({choices}) or explicitly configure CPU processing"
+        else:
+            recommendation = "Explicitly configure CPU processing"
         return (
             f'CUDA out of memory while loading or running Whisper model "{model_name}". '
             "The GPU model cache was released and the worker remains available. "
-            "Select a smaller Whisper model (for example medium, small, base, or tiny) "
-            "or explicitly configure CPU processing, then retry the job."
+            f"{recommendation}, then retry the job."
         )
 
     def cancel_current_job(self) -> bool:
@@ -717,7 +729,7 @@ class TranscriptionWorker:
                 self.stopping.wait(worker_settings.retry_delay_seconds)
 
 
-def main() -> None:
+def run_worker_slots() -> None:
     concurrency = get_application_settings(force=True).transcription.maximum_concurrent_transcription_jobs
     if concurrency == 1:
         worker = TranscriptionWorker()
@@ -754,6 +766,20 @@ def main() -> None:
             if thread.is_alive():
                 thread.join(timeout=5)
         close_database()
+
+
+def main() -> None:
+    lock_path = Path(get_settings().storage_root) / ".transcription-worker.lock"
+    instance_lock = WorkerInstanceLock(lock_path.resolve())
+    try:
+        instance_lock.acquire()
+    except WorkerInstanceAlreadyRunning as exc:
+        logger.error("Transcription worker refused duplicate startup: %s", exc)
+        raise SystemExit(2) from exc
+    try:
+        run_worker_slots()
+    finally:
+        instance_lock.release()
 
 
 if __name__ == "__main__":

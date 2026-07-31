@@ -273,7 +273,7 @@ class FasterWhisperBackend:
                 raise TranscriptionBackendError(
                     "model_download_failed", f"faster-whisper model download failed: {exc}", stage="load"
                 ) from exc
-            if any(marker in message for marker in ("cudnn", "cublas", "library", "symbol not found")):
+            if _is_dependency_incompatible(exc):
                 raise TranscriptionBackendError(
                     "dependency_incompatible", f"faster-whisper dependency is incompatible: {exc}", stage="load"
                 ) from exc
@@ -336,6 +336,10 @@ class FasterWhisperBackend:
             if _is_oom(exc):
                 self.unload_model()
                 raise BackendOutOfMemoryError("oom_inference", str(exc), stage="inference") from exc
+            if _is_dependency_incompatible(exc):
+                raise TranscriptionBackendError(
+                    "dependency_incompatible", f"faster-whisper dependency is incompatible: {exc}", stage="inference"
+                ) from exc
             raise
         return {
             "text": "".join(str(segment["text"]) for segment in normalized_segments).strip(),
@@ -357,6 +361,11 @@ class FasterWhisperBackend:
 def _is_oom(exc: BaseException) -> bool:
     message = str(exc).lower()
     return "out of memory" in message or "cuda_error_out_of_memory" in message
+
+
+def _is_dependency_incompatible(exc: BaseException) -> bool:
+    message = str(exc).lower()
+    return any(marker in message for marker in ("cudnn", "cublas", "library", "symbol not found"))
 
 
 class TranscriptionBackendManager:

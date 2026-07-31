@@ -119,6 +119,26 @@ class FasterWhisperContractTests(unittest.TestCase):
         self.assertEqual(result["segments"][0]["words"][0]["probability"], 0.9)
         progress.assert_called_once_with(100)
 
+    def test_lazy_cuda_library_error_is_structured_as_inference_dependency_failure(self):
+        def generated():
+            raise RuntimeError("Library libcublas.so.12 is not found or cannot be loaded")
+            yield
+
+        fake_model = MagicMock()
+        fake_model.transcribe.return_value = (
+            generated(),
+            SimpleNamespace(language="en", language_probability=1.0, duration=1.0),
+        )
+        backend = FasterWhisperBackend()
+        backend.model = fake_model
+        backend.config = BackendConfig("faster-whisper", "large-v3", "cuda", "int8_float16")
+
+        with self.assertRaises(TranscriptionBackendError) as raised:
+            backend.transcribe(Path("audio.wav"), TranscriptionOptions(language="en"))
+
+        self.assertEqual(raised.exception.code, "dependency_incompatible")
+        self.assertEqual(raised.exception.stage, "inference")
+
 
 class BackendManagerCacheTests(unittest.TestCase):
     def setUp(self):

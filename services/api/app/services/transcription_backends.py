@@ -15,6 +15,7 @@ from typing import Callable, Protocol
 import torch
 
 from .whisper_adapter import WhisperAdapter
+from .cuda12_runtime import Cuda12Runtime, Cuda12RuntimeFailure, activate_faster_whisper_cuda
 
 BACKENDS = ("pytorch", "faster-whisper")
 MODELS = ("tiny", "base", "small", "medium", "large-v3")
@@ -32,10 +33,42 @@ COMPUTE_MATRIX = {
 
 
 class TranscriptionBackendError(RuntimeError):
-    def __init__(self, code: str, message: str, *, stage: str | None = None) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        stage: str | None = None,
+        detail: str | None = None,
+        backend: str | None = None,
+        device: str | None = None,
+        compute_type: str | None = None,
+        missing_library: str | None = None,
+        remediation: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
         self.stage = stage
+        self.detail = detail
+        self.backend = backend
+        self.device = device
+        self.compute_type = compute_type
+        self.missing_library = missing_library
+        self.remediation = remediation
+
+    def structured_details(self) -> dict[str, str]:
+        return {
+            key: value
+            for key, value in {
+                "detail": self.detail,
+                "backend": self.backend,
+                "device": self.device,
+                "compute_type": self.compute_type,
+                "missing_library": self.missing_library,
+                "remediation": self.remediation,
+            }.items()
+            if value is not None
+        }
 
 
 class BackendOutOfMemoryError(TranscriptionBackendError):
@@ -250,8 +283,24 @@ class FasterWhisperBackend:
     def __init__(self) -> None:
         self.model: object | None = None
         self.config: BackendConfig | None = None
+        self.cuda_runtime: Cuda12Runtime | None = None
 
     def load_model(self, config: BackendConfig) -> object:
+        if config.device == "cuda":
+            try:
+                self.cuda_runtime = activate_faster_whisper_cuda(config.compute_type)
+            except Cuda12RuntimeFailure as exc:
+                raise TranscriptionBackendError(
+                    "dependency_incompatible",
+                    str(exc),
+                    stage="load",
+                    detail=exc.detail,
+                    backend=config.backend,
+                    device=config.device,
+                    compute_type=config.compute_type,
+                    missing_library=exc.missing_library,
+                    remediation=exc.remediation,
+                ) from exc
         try:
             from faster_whisper import WhisperModel
         except ImportError as exc:
@@ -274,8 +323,17 @@ class FasterWhisperBackend:
                     "model_download_failed", f"faster-whisper model download failed: {exc}", stage="load"
                 ) from exc
             if _is_dependency_incompatible(exc):
+                detail, missing_library = _dependency_failure_details(exc)
                 raise TranscriptionBackendError(
-                    "dependency_incompatible", f"faster-whisper dependency is incompatible: {exc}", stage="load"
+                    "dependency_incompatible",
+                    f"faster-whisper dependency is incompatible: {exc}",
+                    stage="load",
+                    detail=detail,
+                    backend=config.backend,
+                    device=config.device,
+                    compute_type=config.compute_type,
+                    missing_library=missing_library,
+                    remediation="Reinstall the project CUDA 12 dependencies and restart the worker",
                 ) from exc
             raise
         self.config = config
@@ -337,8 +395,18 @@ class FasterWhisperBackend:
                 self.unload_model()
                 raise BackendOutOfMemoryError("oom_inference", str(exc), stage="inference") from exc
             if _is_dependency_incompatible(exc):
+                detail, missing_library = _dependency_failure_details(exc)
+                config = self.config
                 raise TranscriptionBackendError(
-                    "dependency_incompatible", f"faster-whisper dependency is incompatible: {exc}", stage="inference"
+                    "dependency_incompatible",
+                    f"faster-whisper dependency is incompatible: {exc}",
+                    stage="inference",
+                    detail=detail,
+                    backend=config.backend if config else "faster-whisper",
+                    device=config.device if config else None,
+                    compute_type=config.compute_type if config else None,
+                    missing_library=missing_library,
+                    remediation="Reinstall the project CUDA 12 dependencies and restart the worker",
                 ) from exc
             raise
         return {
@@ -352,10 +420,17 @@ class FasterWhisperBackend:
     def unload_model(self) -> None:
         self.model = None
         self.config = None
+        self.cuda_runtime = None
         gc.collect()
 
     def get_runtime_metadata(self) -> dict[str, object]:
-        return {}
+        if self.cuda_runtime is None:
+            return {}
+        return {
+            "cuda12_library_paths": list(self.cuda_runtime.library_paths),
+            "ctranslate_cuda_device_count": self.cuda_runtime.cuda_device_count,
+            "ctranslate_cuda_compute_types": list(self.cuda_runtime.supported_compute_types),
+        }
 
 
 def _is_oom(exc: BaseException) -> bool:
@@ -366,6 +441,15 @@ def _is_oom(exc: BaseException) -> bool:
 def _is_dependency_incompatible(exc: BaseException) -> bool:
     message = str(exc).lower()
     return any(marker in message for marker in ("cudnn", "cublas", "library", "symbol not found"))
+
+
+def _dependency_failure_details(exc: BaseException) -> tuple[str, str | None]:
+    message = str(exc).lower()
+    if "cublas" in message:
+        return "missing_cublas_cuda12", "libcublas.so.12"
+    if "cudnn" in message:
+        return "missing_cudnn9", "libcudnn.so.9"
+    return "dependency_incompatible", None
 
 
 class TranscriptionBackendManager:
@@ -477,6 +561,7 @@ class TranscriptionBackendManager:
             self._backend = selected
             self._config = config
             backend_metadata = selected.get_runtime_metadata()
+            self._metadata.update(backend_metadata)
             vram_after: int | None = None
             if config.device == "cuda" and torch.cuda.is_available():
                 try:

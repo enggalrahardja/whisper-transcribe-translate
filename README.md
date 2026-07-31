@@ -218,6 +218,40 @@ These are engineering targets. Actual guarantees require benchmark results on th
 
 Full staged implementation details are available in [PLAN.md](./PLAN.md).
 
+## faster-whisper CUDA runtime
+
+Current CTranslate2 wheels require CUDA 12 cuBLAS and cuDNN 9 for GPU
+inference. The API dependencies therefore include `nvidia-cublas-cu12` and
+`nvidia-cudnn-cu12==9.*`. These libraries can coexist with the CUDA runtime
+bundled by PyTorch; PyTorch does not need to be upgraded or replaced.
+
+On Linux, the faster-whisper backend resolves `nvidia.cublas.lib` and
+`nvidia.cudnn.lib` lazily when a CUDA job is loaded. It prepends their package
+directories to the existing `LD_LIBRARY_PATH` without duplicates and preloads
+the libraries before CTranslate2 inference. PyTorch jobs and CPU
+faster-whisper jobs do not run this CUDA 12 resolver.
+
+Verify the runtime from the project virtualenv:
+
+```bash
+services/api/.venv/bin/python - <<'PY'
+import ctypes
+from app.services.cuda12_runtime import activate_faster_whisper_cuda
+
+runtime = activate_faster_whisper_cuda("int8_float16")
+ctypes.CDLL("libcublas.so.12")
+ctypes.CDLL("libcudnn.so.9")
+print(runtime.cuda_device_count)
+print(runtime.supported_compute_types)
+PY
+```
+
+Run that command from `services/api` or set `PYTHONPATH=services/api` from the
+repository root. If `libcublas.so.12` is missing, reinstall
+`nvidia-cublas-cu12`; if `libcudnn.so.9` is missing, reinstall
+`nvidia-cudnn-cu12==9.*`. Then restart the worker through the project start
+command so the resolved environment is fresh.
+
 ## Configuration Direction
 
 Provider selection should be configuration-based rather than hard-coded.
@@ -275,4 +309,3 @@ Vendor claims may be included as references but must not replace internal benchm
 - OpenAI next-generation audio models: https://openai.com/index/introducing-our-next-generation-audio-models/
 - Realtime transcription, translation, and pricing: https://openai.com/index/advancing-voice-intelligence-with-new-models-in-the-api/
 - Realtime API: https://platform.openai.com/docs/api-reference/realtime
-

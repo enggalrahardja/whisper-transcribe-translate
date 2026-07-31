@@ -1,4 +1,5 @@
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,11 +9,17 @@ from app.services.transcription_backends import (
     BackendOutOfMemoryError,
     BackendConfig,
     FasterWhisperBackend,
+    PytorchWhisperBackend,
     TranscriptionBackendError,
     TranscriptionBackendManager,
     TranscriptionOptions,
     canonical_model_name,
     resolve_backend_config,
+)
+from app.services.cuda12_runtime import (
+    Cuda12RuntimeFailure,
+    merge_library_path,
+    resolve_cuda12_library_paths,
 )
 
 
@@ -67,14 +74,56 @@ class FasterWhisperContractTests(unittest.TestCase):
         loaded_model = object()
         loader = MagicMock(return_value=loaded_model)
         fake_module = SimpleNamespace(WhisperModel=loader)
-        with patch.dict(sys.modules, {"faster_whisper": fake_module}):
+        with (
+            patch.dict(sys.modules, {"faster_whisper": fake_module}),
+            patch("app.services.transcription_backends.activate_faster_whisper_cuda") as activate_cuda,
+        ):
             backend = FasterWhisperBackend()
             result = backend.load_model(
                 BackendConfig("faster-whisper", "large-v3", "cuda", "int8_float16")
             )
 
         self.assertIs(result, loaded_model)
+        activate_cuda.assert_called_once_with("int8_float16")
         loader.assert_called_once_with("large-v3", device="cuda", compute_type="int8_float16")
+
+    def test_cpu_loader_does_not_activate_cuda12_runtime(self):
+        loader = MagicMock(return_value=object())
+        with (
+            patch.dict(sys.modules, {"faster_whisper": SimpleNamespace(WhisperModel=loader)}),
+            patch("app.services.transcription_backends.activate_faster_whisper_cuda") as activate_cuda,
+        ):
+            FasterWhisperBackend().load_model(
+                BackendConfig("faster-whisper", "base", "cpu", "int8")
+            )
+
+        activate_cuda.assert_not_called()
+
+    def test_missing_cuda12_library_has_structured_context(self):
+        failure = Cuda12RuntimeFailure(
+            "missing_cublas_cuda12",
+            "libcublas.so.12 is missing",
+            "libcublas.so.12",
+            "Install nvidia-cublas-cu12 and restart the worker",
+        )
+        with patch(
+            "app.services.transcription_backends.activate_faster_whisper_cuda",
+            side_effect=failure,
+        ):
+            with self.assertRaises(TranscriptionBackendError) as raised:
+                FasterWhisperBackend().load_model(
+                    BackendConfig("faster-whisper", "large-v3", "cuda", "int8_float16")
+                )
+
+        error = raised.exception
+        self.assertEqual(error.code, "dependency_incompatible")
+        self.assertEqual(error.detail, "missing_cublas_cuda12")
+        self.assertEqual(error.stage, "load")
+        self.assertEqual(error.backend, "faster-whisper")
+        self.assertEqual(error.device, "cuda")
+        self.assertEqual(error.compute_type, "int8_float16")
+        self.assertEqual(error.missing_library, "libcublas.so.12")
+        self.assertIn("restart", error.remediation.lower())
 
     def test_generator_is_consumed_and_normalized(self):
         segment = SimpleNamespace(
@@ -138,6 +187,27 @@ class FasterWhisperContractTests(unittest.TestCase):
 
         self.assertEqual(raised.exception.code, "dependency_incompatible")
         self.assertEqual(raised.exception.stage, "inference")
+        self.assertEqual(raised.exception.detail, "missing_cublas_cuda12")
+        self.assertEqual(raised.exception.backend, "faster-whisper")
+        self.assertEqual(raised.exception.device, "cuda")
+        self.assertEqual(raised.exception.compute_type, "int8_float16")
+        self.assertEqual(raised.exception.missing_library, "libcublas.so.12")
+
+
+class PytorchIsolationTests(unittest.TestCase):
+    def test_pytorch_loader_does_not_activate_cuda12_runtime(self):
+        adapter = MagicMock()
+        adapter.effective_device = "cuda"
+        adapter.load_model.return_value = object()
+        with (
+            patch("app.services.transcription_backends.WhisperAdapter", return_value=adapter),
+            patch("app.services.transcription_backends.activate_faster_whisper_cuda") as activate_cuda,
+        ):
+            PytorchWhisperBackend().load_model(
+                BackendConfig("pytorch", "base", "cuda", "float16")
+            )
+
+        activate_cuda.assert_not_called()
 
 
 class BackendManagerCacheTests(unittest.TestCase):
@@ -165,7 +235,7 @@ class BackendManagerCacheTests(unittest.TestCase):
                 self.unloads += 1
 
             def get_runtime_metadata(self):
-                return {}
+                return {"backend_runtime_marker": "available"}
 
         with (
             patch("app.services.transcription_backends.resolve_backend_config", side_effect=lambda b, m, d, c: BackendConfig(b, canonical_model_name(m), d, c)),
@@ -184,6 +254,7 @@ class BackendManagerCacheTests(unittest.TestCase):
         self.assertEqual(instances[0].unloads, 1)
         self.assertEqual(manager.cached_model_count, 1)
         self.assertEqual(manager.last_load_metadata["cache_identity"], "faster-whisper:base:cpu:int8")
+        self.assertEqual(manager.last_load_metadata["backend_runtime_marker"], "available")
 
     def test_model_and_compute_changes_each_replace_the_active_cache(self):
         instances = []
@@ -258,6 +329,39 @@ class BackendManagerCacheTests(unittest.TestCase):
         self.assertEqual(manager.cached_model_count, 0)
         self.assertEqual(manager.last_load_metadata["model_status"], "failed")
         pytorch_backend.assert_not_called()
+
+
+class Cuda12LibraryPathTests(unittest.TestCase):
+    def test_namespace_packages_are_resolved_from_module_path(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cublas = root / "cublas"
+            cudnn = root / "cudnn"
+            cublas.mkdir()
+            cudnn.mkdir()
+            (cublas / "libcublas.so.12").touch()
+            (cudnn / "libcudnn.so.9").touch()
+            modules = [
+                SimpleNamespace(__file__=None, __path__=[str(cublas)]),
+                SimpleNamespace(__file__=None, __path__=[str(cudnn)]),
+            ]
+            with patch("app.services.cuda12_runtime.importlib.import_module", side_effect=modules):
+                self.assertEqual(
+                    resolve_cuda12_library_paths(),
+                    (str(cublas.resolve()), str(cudnn.resolve())),
+                )
+
+    def test_existing_library_path_is_preserved(self):
+        self.assertEqual(
+            merge_library_path("/existing/one:/existing/two", ("/cuda/cublas", "/cuda/cudnn")),
+            "/cuda/cublas:/cuda/cudnn:/existing/one:/existing/two",
+        )
+
+    def test_duplicate_paths_are_removed_without_reordering(self):
+        self.assertEqual(
+            merge_library_path("/cuda/cudnn:/existing:/cuda/cublas", ("/cuda/cublas", "/cuda/cudnn")),
+            "/cuda/cublas:/cuda/cudnn:/existing",
+        )
 
 
 if __name__ == "__main__":

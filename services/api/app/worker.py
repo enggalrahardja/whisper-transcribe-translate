@@ -171,6 +171,7 @@ class TranscriptionWorker:
                                 "backend": backend,
                                 "device": device,
                                 "compute_type": compute_type,
+                                **(exc.structured_details() if isinstance(exc, TranscriptionBackendError) else {}),
                             },
                             "completed_at": now,
                             "updated_at": now,
@@ -682,6 +683,7 @@ class TranscriptionWorker:
                     "model": str(job.get("model", "base")),
                     "device": device,
                     "compute_type": compute_type,
+                    **exc.structured_details(),
                 },
             ):
                 logger.exception("Failed job %s: %s", job_id, error)
@@ -710,6 +712,7 @@ class TranscriptionWorker:
                     "model": str(job.get("model", "base")),
                     "device": device,
                     "compute_type": compute_type,
+                    **exc.structured_details(),
                 },
             ):
                 logger.exception("Failed job %s: %s", job_id, error)

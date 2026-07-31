@@ -37,7 +37,7 @@ class JobTranscriptionSettingsTests(unittest.TestCase):
             },
         }
         options = inference_options(job, application_settings())
-        self.assertEqual(options.language, "auto")
+        self.assertIsNone(options.language)
         self.assertIsNone(options.no_speech_threshold)
         self.assertFalse(options.condition_on_previous_text)
         self.assertEqual((options.beam_size, options.best_of, options.temperature), (9, 7, 0.4))

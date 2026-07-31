@@ -204,12 +204,29 @@ export default function JobDetailPage() {
           <div><dt>Media type</dt><dd>{job.media_type}</dd></div>
           <div><dt>File size</dt><dd>{formatBytes(job.file_size)}</dd></div>
           <div><dt>Model</dt><dd>{job.model}</dd></div>
-          <div><dt>{isTranslation ? "Source language" : "Language"}</dt><dd>{languageLabel(job.language)}</dd></div>
+          <div><dt>Requested backend</dt><dd>{job.transcription_backend === "pytorch" ? "Whisper PyTorch" : "faster-whisper"}</dd></div>
+          <div><dt>Requested device</dt><dd>{job.transcription_device}</dd></div>
+          <div><dt>Requested compute type</dt><dd>{job.transcription_compute_type}</dd></div>
+          <div><dt>{isTranslation ? "Source language" : "Language display"}</dt><dd>{job.language_label || languageLabel(job.language)}</dd></div>
           {isTranslation ? <div><dt>Target language</dt><dd>{languageLabel(job.target_language)}</dd></div> : null}
           <div><dt>Created</dt><dd>{browserFormattingReady ? formatBrowserDate(job.created_at) : "—"}</dd></div>
           <div><dt>Started</dt><dd>{browserFormattingReady ? formatBrowserDate(job.started_at) : "—"}</dd></div>
           <div><dt>Completed</dt><dd>{browserFormattingReady ? formatBrowserDate(job.completed_at) : "—"}</dd></div>
         </dl>
+
+        {job.model_load_metadata ? <details className="job-config-details" open={job.status === "processing" || job.status === "failed"}>
+          <summary>Transcription runtime</summary>
+          <dl className="job-metadata">
+            <div><dt>Backend</dt><dd>{job.model_load_metadata.active_backend ?? "—"}</dd></div>
+            <div><dt>Model</dt><dd>{job.model_load_metadata.active_model ?? "—"}</dd></div>
+            <div><dt>Device</dt><dd>{job.model_load_metadata.device ?? "—"}</dd></div>
+            <div><dt>Compute Type</dt><dd>{job.model_load_metadata.compute_type ?? "—"}</dd></div>
+            <div><dt>Runtime language code</dt><dd><code>{job.model_load_metadata.language_code ?? job.language_code ?? "auto"}</code></dd></div>
+            <div><dt>Model Status</dt><dd>{job.model_load_metadata.model_status?.replaceAll("_", " ") ?? "Not loaded"}</dd></div>
+            <div><dt>Load Duration</dt><dd>{job.model_load_metadata.model_load_duration_seconds == null ? "—" : `${job.model_load_metadata.model_load_duration_seconds.toFixed(3)} s`}</dd></div>
+            <div><dt>Inference Duration</dt><dd>{job.model_load_metadata.inference_duration_seconds == null ? "—" : `${job.model_load_metadata.inference_duration_seconds.toFixed(3)} s`}</dd></div>
+          </dl>
+        </details> : null}
 
         {job.transcription_config ? <details className="job-config-details">
           <summary>Advanced transcription settings</summary>

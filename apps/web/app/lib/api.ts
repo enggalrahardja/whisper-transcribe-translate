@@ -1,17 +1,35 @@
 export const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000";
 
 export type JobStatus = "queued" | "processing" | "completed" | "failed" | "cancelled";
-export type WhisperModelName = "tiny" | "base" | "small" | "medium" | "large";
+export type WhisperModelName = "tiny" | "base" | "small" | "medium" | "large" | "large-v3" | "turbo";
+export type TranscriptionBackendName = "pytorch" | "faster-whisper";
+export type TranscriptionDeviceName = "auto" | "cpu" | "cuda";
+export type TranscriptionComputeType = "auto" | "float16" | "float32" | "int8_float16" | "int8";
+
+export type TranscriptionCapabilities = {
+  backends: Array<{ id: TranscriptionBackendName; label: string; available: boolean; reason: string | null }>;
+  devices: Array<{ id: "cpu" | "cuda"; label: string; available: boolean }>;
+  compute_types: Record<TranscriptionBackendName, Record<"cpu" | "cuda", TranscriptionComputeType[]>>;
+  models: WhisperModelName[];
+  recommended: { backend: TranscriptionBackendName; model: WhisperModelName; device: "cpu" | "cuda"; compute_type: TranscriptionComputeType };
+  recommended_by_backend: Record<TranscriptionBackendName, { backend: TranscriptionBackendName; model: WhisperModelName; device: "cpu" | "cuda"; compute_type: TranscriptionComputeType }>;
+};
 export type WhisperModelStatus = "not_downloaded" | "downloading" | "available" | "failed" | "corrupted" | "deleting";
 
 export type WhisperModelRegistry = {
+  backend: TranscriptionBackendName;
   model: WhisperModelName;
+  backend_model_id: string;
   status: WhisperModelStatus;
+  storage_kind: "checkpoint" | "ctranslate2_directory";
   file_name: string;
   file_path: string;
   expected_size_bytes: number | null;
   actual_size_bytes: number | null;
+  expected_checksum: string | null;
+  checksum: string | null;
   checksum_valid: boolean | null;
+  validation_status: "not_verified" | "valid" | "invalid";
   downloaded_at: string | null;
   last_verified_at: string | null;
   last_error: string | null;
@@ -26,6 +44,7 @@ export type WhisperModelRegistry = {
 };
 
 export type AvailableWhisperModel = {
+  backend: TranscriptionBackendName;
   model: WhisperModelName;
   file_name: string;
   file_path: string;
@@ -59,7 +78,12 @@ export type Job = {
   file_name: string;
   media_type: string;
   language: string;
+  language_label: string;
+  language_code: string | null;
   model: string;
+  transcription_backend: TranscriptionBackendName;
+  transcription_device: TranscriptionDeviceName;
+  transcription_compute_type: TranscriptionComputeType;
   task: string;
   target_language: string | null;
   transcription_config: AdvancedTranscriptionSettings | null;
@@ -70,11 +94,18 @@ export type Job = {
   file_size: number | null;
   content_type: string | null;
   error: string | null;
+  structured_error: Record<string, unknown> | null;
   model_load_metadata: {
+    requested_backend?: string;
+    active_backend?: string | null;
     requested_model: string;
     active_model: string | null;
     device: string;
     compute_type: string;
+    model_status?: string;
+    model_load_duration_seconds?: number;
+    inference_duration_seconds?: number;
+    language_code?: string | null;
     vram_free_bytes_before_load: number | null;
     vram_total_bytes_before_load: number | null;
   } | null;
@@ -153,6 +184,9 @@ export type LiveSession = {
   status: LiveSessionStatus;
   language: string;
   model: string;
+  transcription_backend: TranscriptionBackendName;
+  transcription_device: TranscriptionDeviceName;
+  transcription_compute_type: TranscriptionComputeType;
   started_at: string;
   ended_at: string | null;
   duration: number;
@@ -213,7 +247,9 @@ export type ApplicationSettings = {
     theme_preference: "system" | "light" | "dark";
   };
   transcription: {
+    backend: TranscriptionBackendName;
     device: "auto" | "cpu" | "cuda";
+    compute_type: TranscriptionComputeType;
     fp16: boolean;
     beam_size: number;
     temperature: number;
@@ -237,6 +273,8 @@ export type ApplicationSettings = {
     default_live_model: WhisperModelName;
   };
   storage_retention: {
+    storage_location: string;
+    previous_storage_locations: string[];
     upload_max_size_mb: number;
     allowed_extensions: string[];
     media_retention_days: number;
@@ -285,6 +323,26 @@ export type CleanupResult = {
   errors: string[];
 };
 
+export type LocalFile = {
+  id: string;
+  original_name: string;
+  media_type: string;
+  content_type: string | null;
+  file_size: number;
+  created_at: string;
+  job_count: number;
+  active_job_count: number;
+  subtitle_project_count: number;
+  deletable: boolean;
+  protection_reason: string | null;
+};
+
+export type DeleteLocalFileResult = {
+  id: string;
+  original_name: string;
+  bytes_deleted: number;
+};
+
 async function modelRegistryRequest(
   path: string,
   init?: RequestInit,
@@ -306,12 +364,18 @@ async function modelRegistryRequest(
   return await response.json() as WhisperModelRegistry[];
 }
 
-export function getWhisperModels(signal?: AbortSignal): Promise<WhisperModelRegistry[]> {
-  return modelRegistryRequest("/api/settings/models", { signal });
+export function getWhisperModels(
+  backend: TranscriptionBackendName = "pytorch",
+  signal?: AbortSignal,
+): Promise<WhisperModelRegistry[]> {
+  return modelRegistryRequest(`/api/settings/models?backend=${encodeURIComponent(backend)}`, { signal });
 }
 
-export async function getAvailableWhisperModels(signal?: AbortSignal): Promise<AvailableWhisperModel[]> {
-  const response = await fetch(`${apiBaseUrl}/api/settings/models/available`, {
+export async function getAvailableWhisperModels(
+  signal?: AbortSignal,
+  backend: TranscriptionBackendName = "pytorch",
+): Promise<AvailableWhisperModel[]> {
+  const response = await fetch(`${apiBaseUrl}/api/settings/models/available?backend=${encodeURIComponent(backend)}`, {
     cache: "no-store",
     signal,
   });
@@ -321,13 +385,21 @@ export async function getAvailableWhisperModels(signal?: AbortSignal): Promise<A
   return await response.json() as AvailableWhisperModel[];
 }
 
-export function scanWhisperModels(): Promise<WhisperModelRegistry[]> {
-  return modelRegistryRequest("/api/settings/models/scan", { method: "POST" });
+function modelActionBody(backend: TranscriptionBackendName, model?: WhisperModelName): RequestInit {
+  return {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(model ? { backend, model } : { backend }),
+  };
 }
 
-export async function verifyWhisperModel(model: WhisperModelName): Promise<WhisperModelRegistry> {
-  const response = await fetch(`${apiBaseUrl}/api/settings/models/${model}/verify`, {
-    method: "POST",
+export function scanWhisperModels(backend: TranscriptionBackendName): Promise<WhisperModelRegistry[]> {
+  return modelRegistryRequest("/api/settings/models/scan", modelActionBody(backend));
+}
+
+export async function verifyWhisperModel(backend: TranscriptionBackendName, model: WhisperModelName): Promise<WhisperModelRegistry> {
+  const response = await fetch(`${apiBaseUrl}/api/settings/models/verify`, {
+    ...modelActionBody(backend, model),
     cache: "no-store",
   });
   if (!response.ok) {
@@ -343,8 +415,10 @@ export async function verifyWhisperModel(model: WhisperModelName): Promise<Whisp
   return await response.json() as WhisperModelRegistry;
 }
 
-export async function deleteWhisperModel(model: WhisperModelName): Promise<WhisperModelRegistry> {
-  const response = await fetch(`${apiBaseUrl}/api/settings/models/${model}`, {
+export async function deleteWhisperModel(backend: TranscriptionBackendName, model: WhisperModelName): Promise<WhisperModelRegistry> {
+  const action = modelActionBody(backend, model);
+  const response = await fetch(`${apiBaseUrl}/api/settings/models`, {
+    ...action,
     method: "DELETE",
     cache: "no-store",
   });
@@ -362,11 +436,12 @@ export async function deleteWhisperModel(model: WhisperModelName): Promise<Whisp
 }
 
 async function whisperModelAction(
+  backend: TranscriptionBackendName,
   model: WhisperModelName,
   action: "download" | "cancel" | "retry",
 ): Promise<WhisperModelRegistry> {
-  const response = await fetch(`${apiBaseUrl}/api/settings/models/${model}/${action}`, {
-    method: "POST",
+  const response = await fetch(`${apiBaseUrl}/api/settings/models/${action}`, {
+    ...modelActionBody(backend, model),
     cache: "no-store",
   });
   if (!response.ok) {
@@ -382,16 +457,16 @@ async function whisperModelAction(
   return await response.json() as WhisperModelRegistry;
 }
 
-export function downloadWhisperModel(model: WhisperModelName): Promise<WhisperModelRegistry> {
-  return whisperModelAction(model, "download");
+export function downloadWhisperModel(backend: TranscriptionBackendName, model: WhisperModelName): Promise<WhisperModelRegistry> {
+  return whisperModelAction(backend, model, "download");
 }
 
-export function cancelWhisperModelDownload(model: WhisperModelName): Promise<WhisperModelRegistry> {
-  return whisperModelAction(model, "cancel");
+export function cancelWhisperModelDownload(backend: TranscriptionBackendName, model: WhisperModelName): Promise<WhisperModelRegistry> {
+  return whisperModelAction(backend, model, "cancel");
 }
 
-export function retryWhisperModelDownload(model: WhisperModelName): Promise<WhisperModelRegistry> {
-  return whisperModelAction(model, "retry");
+export function retryWhisperModelDownload(backend: TranscriptionBackendName, model: WhisperModelName): Promise<WhisperModelRegistry> {
+  return whisperModelAction(backend, model, "retry");
 }
 
 export function websocketBaseUrl(): string {

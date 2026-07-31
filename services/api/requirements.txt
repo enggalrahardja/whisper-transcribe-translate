@@ -19,3 +19,6 @@ speechbrain>=1.0,<2
 torchaudio==2.11.0
 tzdata>=2024.1
 webrtcvad-wheels==2.0.14
+faster-whisper>=1.1,<2
+nvidia-cublas-cu12
+nvidia-cudnn-cu12==9.*

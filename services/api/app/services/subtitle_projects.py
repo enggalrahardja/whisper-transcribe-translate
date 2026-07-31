@@ -7,7 +7,6 @@ from bson import ObjectId
 from fastapi import HTTPException, status
 from pymongo import ASCENDING, DESCENDING, ReturnDocument
 
-from ..config import get_settings
 from ..database import get_database
 from ..models.subtitle import (
     CreateSubtitleProjectRequest,
@@ -19,6 +18,7 @@ from .jobs import COLLECTION_NAME as JOBS_COLLECTION
 from .media_files import COLLECTION_NAME as MEDIA_COLLECTION
 from .transcripts import COLLECTION_NAME as TRANSCRIPTS_COLLECTION
 from .storage import resolve_storage_file
+from .application_settings import effective_storage_roots
 
 COLLECTION_NAME = "subtitle_projects"
 BURNS_COLLECTION = "subtitle_burn_jobs"
@@ -187,11 +187,11 @@ def delete_subtitle_project(project_id: str) -> bool:
     if document is None:
         return False
     burns = list(database[BURNS_COLLECTION].find({"project_id": project_id}, {"output_path": 1}))
-    storage_root = Path(get_settings().storage_root).resolve()
+    storage_roots = effective_storage_roots()
     for burn in burns:
         if burn.get("output_path"):
             output_path = Path(burn["output_path"]).resolve()
-            if output_path.is_relative_to(storage_root):
+            if any(output_path.is_relative_to(root) for root in storage_roots):
                 output_path.unlink(missing_ok=True)
     database[BURNS_COLLECTION].delete_many({"project_id": project_id})
     return True

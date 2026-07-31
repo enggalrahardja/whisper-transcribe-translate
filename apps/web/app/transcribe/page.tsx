@@ -2,9 +2,9 @@
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { FormEvent, useEffect, useState } from "react";
-import { AdvancedTranscriptionSettings, apiBaseUrl, ApplicationSettings, AvailableWhisperModel, formatBytes, getAvailableWhisperModels, GlossaryOption } from "../lib/api";
-import { sourceLanguages } from "../lib/languages";
+import { FormEvent, useEffect, useMemo, useState } from "react";
+import { AdvancedTranscriptionSettings, apiBaseUrl, ApplicationSettings, AvailableWhisperModel, formatBytes, getAvailableWhisperModels, GlossaryOption, TranscriptionBackendName, TranscriptionCapabilities, TranscriptionComputeType, TranscriptionDeviceName, WhisperModelName } from "../lib/api";
+import { languageLabel, sourceLanguages, transcriptionLanguageCode } from "../lib/languages";
 
 type CreatedJob = {
   id: string;
@@ -30,8 +30,12 @@ const initialAdvancedSettings: AdvancedTranscriptionSettings = {
 export default function TranscribePage() {
   const router = useRouter();
   const [file, setFile] = useState<File | null>(null);
-  const [language, setLanguage] = useState("indonesian");
+  const [languageCode, setLanguageCode] = useState("id");
   const [model, setModel] = useState("");
+  const [backend, setBackend] = useState<TranscriptionBackendName>("pytorch");
+  const [device, setDevice] = useState<TranscriptionDeviceName>("auto");
+  const [computeType, setComputeType] = useState<TranscriptionComputeType>("auto");
+  const [capabilities, setCapabilities] = useState<TranscriptionCapabilities | null>(null);
   const [availableModels, setAvailableModels] = useState<AvailableWhisperModel[]>([]);
   const [modelsLoading, setModelsLoading] = useState(true);
   const [modelsError, setModelsError] = useState("");
@@ -46,27 +50,72 @@ export default function TranscribePage() {
     Promise.all([
       fetch(`${apiBaseUrl}/api/settings`, { cache: "no-store", signal: controller.signal }),
       getAvailableWhisperModels(controller.signal),
+      getAvailableWhisperModels(controller.signal, "faster-whisper"),
       fetch(`${apiBaseUrl}/api/glossaries`, { cache: "no-store", signal: controller.signal }),
-    ]).then(async ([settingsResponse, models, glossariesResponse]) => {
+      fetch(`${apiBaseUrl}/api/settings/transcription-capabilities`, { cache: "no-store", signal: controller.signal }),
+    ]).then(async ([settingsResponse, pytorchModels, fasterModels, glossariesResponse, capabilitiesResponse]) => {
         if (!settingsResponse.ok) throw new Error("Settings could not be loaded");
         if (!glossariesResponse.ok) throw new Error("Glossaries could not be loaded");
+        if (!capabilitiesResponse.ok) throw new Error("Transcription capabilities could not be loaded");
         const settings = await settingsResponse.json() as ApplicationSettings;
+        const loadedCapabilities = await capabilitiesResponse.json() as TranscriptionCapabilities;
         setUploadMaxSizeBytes(settings.storage_retention.upload_max_size_mb * 1024 * 1024);
         setGlossaries(await glossariesResponse.json() as GlossaryOption[]);
+        const models = settings.transcription.backend === "faster-whisper" ? fasterModels : pytorchModels;
         setAvailableModels(models);
-        setLanguage("indonesian");
+        setCapabilities(loadedCapabilities);
+        setBackend(settings.transcription.backend);
+        setDevice(settings.transcription.device);
+        setComputeType(settings.transcription.compute_type);
+        setLanguageCode(transcriptionLanguageCode(settings.general.default_language) ?? "auto");
         setAdvanced((current) => ({ ...current, force_language: true }));
-        setModel(models.some(({ model }) => model === "medium")
-          ? "medium"
-          : models.some(({ model }) => model === settings.general.default_whisper_model)
-            ? settings.general.default_whisper_model
-            : "");
+        const selectable = models.map((item) => item.model);
+        const configuredModel = settings.general.default_whisper_model === "large"
+          ? "large-v3"
+          : settings.general.default_whisper_model;
+        setModel(selectable.includes(configuredModel)
+          ? configuredModel
+          : selectable.includes("medium") ? "medium" : selectable[0] ?? "");
       }).catch((error) => {
         if (error instanceof DOMException && error.name === "AbortError") return;
         setModelsError(error instanceof Error ? error.message : "Available Whisper models could not be loaded");
       }).finally(() => setModelsLoading(false));
     return () => controller.abort();
   }, []);
+
+  const effectiveDevice = device === "auto"
+    ? (capabilities?.devices.some((item) => item.id === "cuda" && item.available) ? "cuda" : "cpu")
+    : device;
+  const validComputeTypes = capabilities?.compute_types[backend]?.[effectiveDevice] ?? [];
+  const selectableModels = useMemo<WhisperModelName[]>(
+    () => availableModels.map((item) => item.model),
+    [availableModels],
+  );
+
+  function updateRuntime(nextBackend: TranscriptionBackendName, nextDevice: TranscriptionDeviceName) {
+    const backendChanged = nextBackend !== backend;
+    const preset = capabilities?.recommended_by_backend[nextBackend];
+    const selectedDevice = backendChanged && preset ? preset.device : nextDevice;
+    setBackend(nextBackend);
+    void getAvailableWhisperModels(undefined, nextBackend).then((models) => {
+      setAvailableModels(models);
+      setModel((current) => backendChanged && preset && models.some((item) => item.model === preset.model)
+        ? preset.model
+        : models.some((item) => item.model === current) ? current : models[0]?.model ?? "");
+    }).catch((error) => setModelsError(error instanceof Error ? error.message : "Available Whisper models could not be loaded"));
+    setDevice(selectedDevice);
+    const resolvedDevice = selectedDevice === "auto"
+      ? (capabilities?.devices.some((item) => item.id === "cuda" && item.available) ? "cuda" : "cpu")
+      : selectedDevice;
+    const valid = capabilities?.compute_types[nextBackend]?.[resolvedDevice] ?? [];
+    if (backendChanged && preset && valid.includes(preset.compute_type)) {
+      setComputeType(preset.compute_type);
+    } else if (nextBackend === "faster-whisper" && resolvedDevice === "cuda" && valid.includes("int8_float16") && computeType === "auto") {
+      setComputeType("int8_float16");
+    } else if (computeType !== "auto" && !valid.includes(computeType)) {
+      setComputeType(nextBackend === "faster-whisper" && resolvedDevice === "cuda" && valid.includes("int8_float16") ? "int8_float16" : valid[0] ?? "auto");
+    }
+  }
 
   function updateAdvanced(patch: Partial<AdvancedTranscriptionSettings>) {
     setAdvanced((current) => ({ ...current, ...patch }));
@@ -83,7 +132,7 @@ export default function TranscribePage() {
 
   useEffect(() => {
     const controller = new AbortController();
-    const refreshModels = () => void getAvailableWhisperModels(controller.signal).then((models) => {
+    const refreshModels = () => void getAvailableWhisperModels(controller.signal, backend).then((models) => {
       setAvailableModels(models);
       setModel((current) => models.some((item) => item.model === current) ? current : "");
     }).catch(() => undefined);
@@ -92,7 +141,7 @@ export default function TranscribePage() {
       controller.abort();
       window.removeEventListener("focus", refreshModels);
     };
-  }, []);
+  }, [backend]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -114,8 +163,11 @@ export default function TranscribePage() {
 
     const body = new FormData();
     body.append("file", file);
-    body.append("language", language);
+    body.append("language", languageCode);
     body.append("model", model);
+    body.append("transcription_backend", backend);
+    body.append("transcription_device", device);
+    body.append("transcription_compute_type", computeType);
     body.append("task", "transcribe");
     body.append("transcription_config", JSON.stringify(advanced));
 
@@ -170,24 +222,37 @@ export default function TranscribePage() {
 
           <div className="upload-options">
             <label>
-              Bahasa
-              <select disabled={submitting} onChange={(event) => {
-                const selected = event.target.value;
-                setLanguage(selected);
-                updateAdvanced({ force_language: selected !== "auto" });
-              }} value={language}>
-                {sourceLanguages.map(([value, label]) => <option key={value} value={value}>{label}</option>)}
+              Transcription Backend
+              <select disabled={submitting} onChange={(event) => updateRuntime(event.target.value as TranscriptionBackendName, device)} value={backend}>
+                {capabilities?.backends.map((item) => <option disabled={!item.available} key={item.id} value={item.id}>{item.label}{item.available ? "" : " (Unavailable)"}</option>) ?? <option value="pytorch">Whisper PyTorch</option>}
               </select>
             </label>
 
             <label>
               Whisper Model
-              <select disabled={submitting || modelsLoading || availableModels.length === 0} onChange={(event) => setModel(event.target.value)} value={model}>
-                <option disabled value="">{modelsLoading ? "Loading models…" : "Select an available model"}</option>
-                {availableModels.map(({ model: availableModel }) => <option key={availableModel} value={availableModel}>{availableModel}</option>)}
+              <select disabled={submitting || modelsLoading || selectableModels.length === 0} onChange={(event) => setModel(event.target.value)} value={model}>
+                <option disabled value="">{modelsLoading ? "Loading models…" : "Select a model"}</option>
+                {selectableModels.map((availableModel) => <option key={availableModel} value={availableModel}>{availableModel}</option>)}
               </select>
             </label>
+
+            <label>
+              Device
+              <select disabled={submitting} onChange={(event) => updateRuntime(backend, event.target.value as TranscriptionDeviceName)} value={device}>
+                <option value="auto">Auto</option>{capabilities?.devices.map((item) => <option disabled={!item.available} key={item.id} value={item.id}>{item.label}{item.available ? "" : " (Unavailable)"}</option>)}
+              </select>
+            </label>
+
+            <label>Compute Type<select disabled={submitting} onChange={(event) => setComputeType(event.target.value as TranscriptionComputeType)} value={computeType}><option value="auto">Auto</option>{validComputeTypes.map((item) => <option key={item} value={item}>{item}</option>)}</select></label>
+
+            <label>
+              Bahasa
+              <select disabled={submitting} onChange={(event) => { const selected = event.target.value; setLanguageCode(selected); updateAdvanced({ force_language: selected !== "auto" }); }} value={languageCode}>{sourceLanguages.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select>
+            </label>
           </div>
+
+          {backend === "pytorch" && ["large", "large-v3"].includes(model) && effectiveDevice === "cuda" ? <p className="model-warning" role="alert">large-v3 with Whisper PyTorch requires substantial VRAM and may fail on an 8 GB GPU.</p> : null}
+          {backend === "faster-whisper" && model === "large-v3" && effectiveDevice === "cuda" && computeType === "int8_float16" ? <p className="recommendation-badge">Recommended for 8 GB VRAM</p> : null}
 
           <fieldset className="advanced-transcription-settings" disabled={submitting}>
             <legend>Advanced Transcription Settings</legend>
@@ -202,7 +267,7 @@ export default function TranscribePage() {
                 </select>
               </label>
 
-              <label className="advanced-toggle"><input checked={advanced.force_language} disabled={language === "auto"} onChange={(event) => updateAdvanced({ force_language: event.target.checked })} type="checkbox" />Force Language</label>
+              <label className="advanced-toggle"><input checked={advanced.force_language} disabled={languageCode === "auto"} onChange={(event) => updateAdvanced({ force_language: event.target.checked })} type="checkbox" />Force Language</label>
               <label className="advanced-toggle"><input checked={advanced.use_vad} onChange={(event) => updateAdvanced({ use_vad: event.target.checked })} type="checkbox" />Use VAD</label>
               <label className="advanced-toggle"><input checked={advanced.use_previous_segment_context} onChange={(event) => updateAdvanced({ use_previous_segment_context: event.target.checked })} type="checkbox" />Use Previous Segment Context</label>
 
@@ -242,15 +307,15 @@ export default function TranscribePage() {
             </div>
           </fieldset>
 
-          {!modelsLoading && availableModels.length === 0 ? <p className="error-callout" role="alert">No Whisper model is available. <Link href="/settings#whisper-models">Open Settings → Whisper Models</Link> to download one.</p> : null}
-          {modelsError ? <p className="error-callout" role="alert">{modelsError} <Link href="/settings#whisper-models">Open model settings</Link>.</p> : null}
+          {!modelsLoading && availableModels.length === 0 ? <p className="error-callout" role="alert">No Whisper model is available for {backend}. <Link href="/settings#models">Open Settings → Models</Link> to download one.</p> : null}
+          {modelsError ? <p className="error-callout" role="alert">{modelsError} <Link href="/settings#models">Open model settings</Link>.</p> : null}
 
           {file ? (
             <dl className="upload-summary">
               <div><dt>File</dt><dd>{file.name}</dd></div>
               <div><dt>Size</dt><dd>{formatBytes(file.size)}</dd></div>
               <div><dt>Model</dt><dd>{model}</dd></div>
-              <div><dt>Language</dt><dd>{language === "auto" ? "Auto Detect" : language}</dd></div>
+              <div><dt>Language</dt><dd>{languageLabel(languageCode)}</dd></div>
             </dl>
           ) : null}
 

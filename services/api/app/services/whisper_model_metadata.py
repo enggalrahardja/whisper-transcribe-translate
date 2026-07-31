@@ -9,28 +9,68 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from src import whisper  # noqa: E402
 
-SUPPORTED_WHISPER_MODELS = ("tiny", "base", "small", "medium", "large")
+SUPPORTED_MODEL_BACKENDS = ("pytorch", "faster-whisper")
+SUPPORTED_WHISPER_MODELS = ("tiny", "base", "small", "medium", "large-v3", "turbo")
 TRUSTED_MODEL_HOSTS = {"openaipublic.azureedge.net"}
-CANONICAL_FILE_NAMES = {
+PYTORCH_TURBO_URL = (
+    "https://openaipublic.azureedge.net/main/whisper/models/"
+    "aff26ae408abcba5fbf8813c21e62b0941638c5f6eebfb145be0c9839262a19a/"
+    "large-v3-turbo.pt"
+)
+PYTORCH_SOURCE_IDS = {
+    "tiny": "tiny",
+    "base": "base",
+    "small": "small",
+    "medium": "medium",
+    "large-v3": "large",
+    "turbo": "turbo",
+}
+PYTORCH_FILE_NAMES = {
     "tiny": "tiny.pt",
     "base": "base.pt",
     "small": "small.pt",
     "medium": "medium.pt",
-    "large": "large-v3.pt",
+    "large-v3": "large-v3.pt",
+    "turbo": "turbo.pt",
+}
+FASTER_WHISPER_REPOSITORIES = {
+    "tiny": "Systran/faster-whisper-tiny",
+    "base": "Systran/faster-whisper-base",
+    "small": "Systran/faster-whisper-small",
+    "medium": "Systran/faster-whisper-medium",
+    "large-v3": "Systran/faster-whisper-large-v3",
+    "turbo": "mobiuslabsgmbh/faster-whisper-large-v3-turbo",
+}
+MODEL_PRESET_BADGES = {
+    "small": "Balanced",
+    "large-v3": "Best accuracy",
+    "turbo": "Fastest",
 }
 
 
 @dataclass(frozen=True)
 class WhisperModelMetadata:
+    backend: str
     model: str
-    source_url: str
-    file_name: str
-    expected_checksum: str
+    backend_model_id: str
+    source: str
+    storage_name: str
+    expected_checksum: str | None
     expected_size_bytes: int | None
+    storage_kind: str
+
+    @property
+    def file_name(self) -> str:
+        return self.storage_name
+
+    @property
+    def source_url(self) -> str:
+        return self.source
 
 
-def _metadata_for(model: str) -> WhisperModelMetadata:
-    url = whisper._MODELS[model]
+def _pytorch_metadata(model: str) -> WhisperModelMetadata:
+    source_id = PYTORCH_SOURCE_IDS[model]
+    url = PYTORCH_TURBO_URL if model == "turbo" else whisper._MODELS[source_id]
     parsed = urlparse(url)
     if parsed.scheme != "https" or parsed.hostname not in TRUSTED_MODEL_HOSTS:
         raise RuntimeError(f"Untrusted Whisper model source for {model}")
@@ -39,22 +79,45 @@ def _metadata_for(model: str) -> WhisperModelMetadata:
     parts = Path(parsed.path).parts
     if len(parts) < 2 or len(parts[-2]) != 64:
         raise RuntimeError(f"Invalid Whisper checksum metadata for {model}")
-    if parts[-1] != CANONICAL_FILE_NAMES[model]:
-        raise RuntimeError(f"Invalid Whisper file name metadata for {model}")
     try:
         int(parts[-2], 16)
     except ValueError as exc:
         raise RuntimeError(f"Invalid Whisper checksum metadata for {model}") from exc
     return WhisperModelMetadata(
+        backend="pytorch",
         model=model,
-        source_url=url,
-        file_name=parts[-1],
+        backend_model_id=model,
+        source=url,
+        storage_name=PYTORCH_FILE_NAMES[model],
         expected_checksum=parts[-2],
-        # The existing Whisper metadata has no authoritative content length.
         expected_size_bytes=None,
+        storage_kind="checkpoint",
     )
 
 
+def _faster_whisper_metadata(model: str) -> WhisperModelMetadata:
+    return WhisperModelMetadata(
+        backend="faster-whisper",
+        model=model,
+        backend_model_id=model,
+        source=FASTER_WHISPER_REPOSITORIES[model],
+        storage_name=model,
+        expected_checksum=None,
+        expected_size_bytes=None,
+        storage_kind="ctranslate2_directory",
+    )
+
+
+MODEL_REGISTRY_METADATA = {
+    (backend, model): (
+        _pytorch_metadata(model) if backend == "pytorch" else _faster_whisper_metadata(model)
+    )
+    for backend in SUPPORTED_MODEL_BACKENDS
+    for model in SUPPORTED_WHISPER_MODELS
+}
+
+# Backward-compatible PyTorch metadata export for existing callers.
 WHISPER_MODEL_METADATA = {
-    model: _metadata_for(model) for model in SUPPORTED_WHISPER_MODELS
+    model: MODEL_REGISTRY_METADATA[("pytorch", model)]
+    for model in SUPPORTED_WHISPER_MODELS
 }

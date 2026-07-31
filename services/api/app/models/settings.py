@@ -4,20 +4,27 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-WhisperModel = Literal["tiny", "base", "small", "medium", "large"]
+WhisperModel = Literal["tiny", "base", "small", "medium", "large", "large-v3", "turbo"]
+ModelRegistryBackend = Literal["pytorch", "faster-whisper"]
 WhisperModelStatus = Literal[
     "not_downloaded", "downloading", "available", "failed", "corrupted", "deleting"
 ]
 
 
 class WhisperModelResponse(BaseModel):
+    backend: ModelRegistryBackend = "pytorch"
     model: WhisperModel
+    backend_model_id: str
     status: WhisperModelStatus
+    storage_kind: Literal["checkpoint", "ctranslate2_directory"]
     file_name: str
     file_path: str
     expected_size_bytes: int | None
     actual_size_bytes: int | None
+    expected_checksum: str | None = None
+    checksum: str | None = None
     checksum_valid: bool | None
+    validation_status: Literal["not_verified", "valid", "invalid"] = "not_verified"
     downloaded_at: datetime | None
     last_verified_at: datetime | None
     last_error: str | None
@@ -32,11 +39,21 @@ class WhisperModelResponse(BaseModel):
 
 
 class AvailableWhisperModelResponse(BaseModel):
+    backend: ModelRegistryBackend = "pytorch"
     model: WhisperModel
     file_name: str
     file_path: str
     actual_size_bytes: int
     last_verified_at: datetime | None
+
+
+class WhisperModelActionRequest(BaseModel):
+    backend: ModelRegistryBackend
+    model: WhisperModel
+
+
+class WhisperModelScanRequest(BaseModel):
+    backend: ModelRegistryBackend
 
 
 class GeneralSettings(BaseModel):
@@ -57,7 +74,9 @@ class GeneralSettings(BaseModel):
 
 
 class TranscriptionSettings(BaseModel):
+    backend: Literal["pytorch", "faster-whisper"] = "pytorch"
     device: Literal["auto", "cpu", "cuda"] = "auto"
+    compute_type: Literal["auto", "float16", "float32", "int8_float16", "int8"] = "auto"
     fp16: bool = True
     beam_size: int = Field(default=5, ge=1, le=20)
     temperature: float = Field(default=0.0, ge=0, le=1)
@@ -90,6 +109,8 @@ class LiveTranscriptionSettings(BaseModel):
 
 
 class StorageRetentionSettings(BaseModel):
+    storage_location: str = Field(default="", max_length=4096)
+    previous_storage_locations: list[str] = Field(default_factory=list, max_length=20)
     upload_max_size_mb: int = Field(default=512, ge=1, le=10240)
     allowed_extensions: list[str] = Field(
         default_factory=lambda: [".wav", ".mp3", ".ogg", ".flac", ".m4a", ".mp4", ".mov", ".wmv", ".avi", ".mkv"],
@@ -176,3 +197,45 @@ class CleanupResponse(BaseModel):
     protected_active_files: int
     protected_project_files: int
     errors: list[str]
+
+
+class LocalFileResponse(BaseModel):
+    id: str
+    original_name: str
+    media_type: str
+    content_type: str | None
+    file_size: int
+    created_at: datetime
+    job_count: int
+    active_job_count: int
+    subtitle_project_count: int
+    deletable: bool
+    protection_reason: str | None
+
+
+class DeleteLocalFileResponse(BaseModel):
+    id: str
+    original_name: str
+    bytes_deleted: int
+
+
+class TranscriptionBackendCapability(BaseModel):
+    id: Literal["pytorch", "faster-whisper"]
+    label: str
+    available: bool
+    reason: str | None = None
+
+
+class TranscriptionDeviceCapability(BaseModel):
+    id: Literal["cpu", "cuda"]
+    label: str
+    available: bool
+
+
+class TranscriptionCapabilitiesResponse(BaseModel):
+    backends: list[TranscriptionBackendCapability]
+    devices: list[TranscriptionDeviceCapability]
+    compute_types: dict[str, dict[str, list[str]]]
+    models: list[str]
+    recommended: dict[str, str]
+    recommended_by_backend: dict[str, dict[str, str]]

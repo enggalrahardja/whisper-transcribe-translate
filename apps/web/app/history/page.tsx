@@ -5,11 +5,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { apiBaseUrl, Job, JobStatus } from "../lib/api";
 import { LiveHistory } from "../components/live-history";
 import { SubtitleHistory } from "../components/subtitle-history";
+import { HistoryPagination } from "../components/history-pagination";
+import { HistoryLoading } from "../components/history-loading";
+import { languageLabel } from "../lib/languages";
 
-const pageSize = 5;
 const terminalStatuses = new Set<JobStatus>(["completed", "failed", "cancelled"]);
 
 type ActionName = "retry" | "cancel" | "delete";
+type HistoryTab = "transcribe" | "translate" | "live" | "subtitles";
 type Feedback = { type: "success" | "error"; message: string } | null;
 
 function formatDate(value: string | null): string {
@@ -37,9 +40,12 @@ export default function HistoryPage() {
   const [pendingAction, setPendingAction] = useState("");
   const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
-  const [taskFilter, setTaskFilter] = useState("all");
   const [sortOrder, setSortOrder] = useState<"newest" | "oldest">("newest");
+  const [activeTab, setActiveTab] = useState<HistoryTab>("transcribe");
   const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
+  const [selectedJobIds, setSelectedJobIds] = useState<Set<string>>(new Set());
+  const [bulkDeleting, setBulkDeleting] = useState(false);
   const activeController = useRef<AbortController | null>(null);
   const refreshInFlight = useRef(false);
 
@@ -79,23 +85,27 @@ export default function HistoryPage() {
 
   useEffect(() => {
     setPage(1);
-  }, [search, sortOrder, statusFilter, taskFilter]);
+    setSelectedJobIds(new Set());
+  }, [activeTab, search, sortOrder, statusFilter, pageSize]);
 
   const filteredJobs = useMemo(() => {
     const normalizedSearch = search.trim().toLocaleLowerCase();
     return jobs
+      .filter((job) => job.task === activeTab)
       .filter((job) => !normalizedSearch || job.file_name.toLocaleLowerCase().includes(normalizedSearch))
       .filter((job) => statusFilter === "all" || job.status === statusFilter)
-      .filter((job) => taskFilter === "all" || job.task === taskFilter)
       .sort((left, right) => {
         const difference = new Date(left.created_at).getTime() - new Date(right.created_at).getTime();
         return sortOrder === "oldest" ? difference : -difference;
       });
-  }, [jobs, search, sortOrder, statusFilter, taskFilter]);
+  }, [activeTab, jobs, search, sortOrder, statusFilter]);
 
   const totalPages = Math.max(1, Math.ceil(filteredJobs.length / pageSize));
   const currentPage = Math.min(page, totalPages);
   const visibleJobs = filteredJobs.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  const deletableVisibleJobs = visibleJobs.filter((job) => terminalStatuses.has(job.status));
+  const allDeletableVisibleSelected = deletableVisibleJobs.length > 0
+    && deletableVisibleJobs.every((job) => selectedJobIds.has(job.id));
 
   async function runAction(job: Job, action: ActionName) {
     if (action === "delete" && !window.confirm(`Delete ${job.file_name}? This cannot be undone.`)) return;
@@ -112,9 +122,21 @@ export default function HistoryPage() {
 
       if (action === "delete") {
         setJobs((currentJobs) => currentJobs.filter((item) => item.id !== job.id));
+        setSelectedJobIds((current) => {
+          const next = new Set(current);
+          next.delete(job.id);
+          return next;
+        });
       } else {
         const updatedJob = await response.json() as Job;
         setJobs((currentJobs) => currentJobs.map((item) => item.id === updatedJob.id ? updatedJob : item));
+        if (action === "retry") {
+          setSelectedJobIds((current) => {
+            const next = new Set(current);
+            next.delete(job.id);
+            return next;
+          });
+        }
       }
       setFeedback({ type: "success", message: `${job.file_name}: ${action} succeeded.` });
       await refresh();
@@ -128,12 +150,52 @@ export default function HistoryPage() {
     }
   }
 
+  function toggleJob(jobId: string) {
+    setSelectedJobIds((current) => {
+      const next = new Set(current);
+      if (next.has(jobId)) next.delete(jobId);
+      else next.add(jobId);
+      return next;
+    });
+  }
+
+  function toggleVisibleJobs() {
+    setSelectedJobIds((current) => {
+      const next = new Set(current);
+      for (const job of deletableVisibleJobs) {
+        if (allDeletableVisibleSelected) next.delete(job.id);
+        else next.add(job.id);
+      }
+      return next;
+    });
+  }
+
+  async function deleteSelectedJobs() {
+    const selectedJobs = jobs.filter((job) => selectedJobIds.has(job.id) && terminalStatuses.has(job.status));
+    if (selectedJobs.length === 0 || !window.confirm(`Delete ${selectedJobs.length} selected job${selectedJobs.length === 1 ? "" : "s"}? This cannot be undone.`)) return;
+    setBulkDeleting(true);
+    setFeedback(null);
+    const results = await Promise.allSettled(selectedJobs.map(async (job) => {
+      const response = await fetch(`${apiBaseUrl}/api/jobs/${job.id}`, { method: "DELETE" });
+      if (!response.ok) throw new Error(await getResponseError(response));
+      return job.id;
+    }));
+    const deletedIds = new Set(results.flatMap((result) => result.status === "fulfilled" ? [result.value] : []));
+    const failed = results.length - deletedIds.size;
+    setJobs((current) => current.filter((job) => !deletedIds.has(job.id)));
+    setSelectedJobIds((current) => new Set([...current].filter((id) => !deletedIds.has(id))));
+    setFeedback(failed === 0
+      ? { type: "success", message: `${deletedIds.size} job${deletedIds.size === 1 ? "" : "s"} deleted.` }
+      : { type: "error", message: `${deletedIds.size} deleted; ${failed} could not be deleted.` });
+    setBulkDeleting(false);
+  }
+
   function resetFilters() {
     setSearch("");
     setStatusFilter("all");
-    setTaskFilter("all");
     setSortOrder("newest");
     setPage(1);
+    setSelectedJobIds(new Set());
   }
 
   return (
@@ -144,10 +206,42 @@ export default function HistoryPage() {
           <h1>History</h1>
           <p>Find previous jobs and manage their lifecycle.</p>
         </div>
-        <span>{filteredJobs.length} job{filteredJobs.length === 1 ? "" : "s"}</span>
+        <div className="history-header-actions"><span>{jobs.length} job{jobs.length === 1 ? "" : "s"}</span></div>
       </header>
 
-      <section className="history-card">
+      <div aria-label="History sections" className="settings-tabs history-tabs" role="tablist">
+        {([
+          ["transcribe", "Transcribe Audio"],
+          ["translate", "Translate Audio"],
+          ["live", "Live Sessions"],
+          ["subtitles", "Subtitle Projects"],
+        ] as Array<[HistoryTab, string]>).map(([id, label]) => (
+          <button
+            aria-controls={`history-panel-${id}`}
+            aria-selected={activeTab === id}
+            className={activeTab === id ? "active" : ""}
+            id={`history-tab-${id}`}
+            key={id}
+            onClick={() => setActiveTab(id)}
+            role="tab"
+            tabIndex={activeTab === id ? 0 : -1}
+            type="button"
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {activeTab === "transcribe" || activeTab === "translate" ? <section aria-labelledby={`history-tab-${activeTab}`} className="history-card" id={`history-panel-${activeTab}`} role="tabpanel">
+        <div className="section-heading history-list-heading">
+          <div><p className="eyebrow">AUDIO JOBS</p><h2>{activeTab === "transcribe" ? "Transcribe Audio" : "Translate Audio"}</h2></div>
+          <div className="history-heading-actions">
+            <button className="danger" disabled={selectedJobIds.size === 0 || bulkDeleting} onClick={deleteSelectedJobs} type="button">
+              {bulkDeleting ? "Deleting…" : `Delete selected (${selectedJobIds.size})`}
+            </button>
+            <Link href={`/${activeTab}`}>Start new {activeTab} audio</Link>
+          </div>
+        </div>
         <div className="history-filters">
           <label>
             Search file name
@@ -165,14 +259,6 @@ export default function HistoryPage() {
             </select>
           </label>
           <label>
-            Task
-            <select onChange={(event) => setTaskFilter(event.target.value)} value={taskFilter}>
-              <option value="all">All tasks</option>
-              <option value="transcribe">Transcribe</option>
-              <option value="translate">Translate</option>
-            </select>
-          </label>
-          <label>
             Created at
             <select onChange={(event) => setSortOrder(event.target.value as "newest" | "oldest")} value={sortOrder}>
               <option value="newest">Newest first</option>
@@ -187,24 +273,29 @@ export default function HistoryPage() {
         ) : null}
         {loadError ? <p className="history-feedback error" role="alert">{loadError}</p> : null}
 
-        <div className="history-table-wrap">
+        {loading ? <HistoryLoading label={`Loading ${activeTab} audio history`} /> : <div className="history-table-wrap">
           <table className="history-table">
             <thead>
               <tr>
-                <th>File name</th><th>Task</th><th>Language</th><th>Model</th><th>Status</th>
+                <th className="history-select-cell"><input aria-label="Select all deletable jobs on this page" checked={allDeletableVisibleSelected} disabled={deletableVisibleJobs.length === 0} onChange={toggleVisibleJobs} type="checkbox" /></th>
+                <th>No.</th>
+                <th>File name</th><th>Device type</th><th>Language</th><th>Model</th><th>Status</th>
                 <th>Progress</th><th>Created</th><th>Completed</th><th>Action</th>
               </tr>
             </thead>
             <tbody>
-              {visibleJobs.map((job) => {
+              {visibleJobs.map((job, index) => {
                 const busy = pendingAction.startsWith(`${job.id}:`);
+                const deletable = terminalStatuses.has(job.status);
                 return (
                   <tr key={job.id}>
+                    <td className="history-select-cell"><input aria-label={`Select ${job.file_name}`} checked={selectedJobIds.has(job.id)} disabled={!deletable || bulkDeleting} onChange={() => toggleJob(job.id)} type="checkbox" /></td>
+                    <td>{(currentPage - 1) * pageSize + index + 1}</td>
                     <td><strong>{job.file_name}</strong></td>
-                    <td>{job.task}</td>
+                    <td>{job.media_type}</td>
                     <td>
-                      {job.language === "auto" ? "Auto" : job.language}
-                      {job.task === "translate" && job.target_language ? <small>→ {job.target_language}</small> : null}
+                      {job.language_label || languageLabel(job.language)}
+                      {job.task === "translate" && job.target_language ? <small>→ {languageLabel(job.target_language)}</small> : null}
                     </td>
                     <td>{job.model}</td>
                     <td>
@@ -229,9 +320,15 @@ export default function HistoryPage() {
                             {job.cancellation_requested ? "Requested" : "Cancel"}
                           </button>
                         ) : null}
-                        {terminalStatuses.has(job.status) ? (
-                          <button className="danger" disabled={busy} onClick={() => runAction(job, "delete")} type="button">Delete</button>
-                        ) : null}
+                        <button
+                          className="danger"
+                          disabled={busy || !terminalStatuses.has(job.status)}
+                          onClick={() => runAction(job, "delete")}
+                          title={terminalStatuses.has(job.status) ? undefined : "Cancel the active job before deleting it"}
+                          type="button"
+                        >
+                          Delete
+                        </button>
                       </div>
                     </td>
                   </tr>
@@ -239,21 +336,14 @@ export default function HistoryPage() {
               })}
             </tbody>
           </table>
-        </div>
+        </div>}
 
         {!loading && visibleJobs.length === 0 ? <p className="history-empty">No jobs match these filters.</p> : null}
-        {loading ? <p className="history-empty">Loading history…</p> : null}
 
-        <div className="history-pagination">
-          <span>Page {currentPage} of {totalPages}</span>
-          <div>
-            <button disabled={currentPage === 1} onClick={() => setPage((value) => Math.max(1, value - 1))} type="button">Previous</button>
-            <button disabled={currentPage === totalPages} onClick={() => setPage((value) => Math.min(totalPages, value + 1))} type="button">Next</button>
-          </div>
-        </div>
-      </section>
-      <LiveHistory />
-      <SubtitleHistory />
+        {!loading ? <HistoryPagination page={currentPage} pageSize={pageSize} total={filteredJobs.length} totalPages={totalPages} onPageChange={setPage} onPageSizeChange={setPageSize} /> : null}
+      </section> : null}
+      {activeTab === "live" ? <div aria-labelledby="history-tab-live" id="history-panel-live" role="tabpanel"><LiveHistory /></div> : null}
+      {activeTab === "subtitles" ? <div aria-labelledby="history-tab-subtitles" id="history-panel-subtitles" role="tabpanel"><SubtitleHistory /></div> : null}
     </section>
   );
 }

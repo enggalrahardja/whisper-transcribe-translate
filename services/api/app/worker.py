@@ -10,7 +10,6 @@ from time import monotonic
 
 from bson import ObjectId
 from pymongo import ASCENDING, ReturnDocument
-import torch
 
 from .config import get_settings
 from .database import close_database, get_database
@@ -19,12 +18,19 @@ from .services.application_settings import RUNTIME_COLLECTION, get_application_s
 from .services.media_files import COLLECTION_NAME as MEDIA_COLLECTION, ensure_media_file_indexes
 from .services.translation_adapter import TranslationAdapter
 from .services.transcripts import COLLECTION_NAME as TRANSCRIPTS_COLLECTION, ensure_transcript_indexes
-from .services.whisper_adapter import WhisperAdapter
 from .services.whisper_models import (
     WhisperModelUnavailableError,
     require_whisper_model_available,
     whisper_model_unavailable_message,
 )
+from .services.transcription_backends import (
+    BackendOutOfMemoryError,
+    TranscriptionBackendError,
+    TranscriptionBackendManager,
+    pytorch_model_name,
+    resolve_backend_config,
+)
+from .services.transcription_languages import InvalidTranscriptionLanguage
 from .services.storage import resolve_storage_file
 from .services.job_transcription import apply_job_output_config, inference_options
 from .services.dependency_compatibility import (
@@ -52,7 +58,7 @@ class TranscriptionWorker:
         self.transcripts = self.database[TRANSCRIPTS_COLLECTION]
         base_worker_id = f"{socket.gethostname()}:{os.getpid()}"
         self.worker_id = base_worker_id if slot is None else f"{base_worker_id}:{slot}"
-        self.adapter = WhisperAdapter(device=self.application_settings.transcription.device)
+        self.adapter = TranscriptionBackendManager()
         self.translation_adapter = TranslationAdapter()
         self.stopping = threading.Event()
         self.current_job_id: ObjectId | None = None
@@ -144,9 +150,23 @@ class TranscriptionWorker:
 
             model_name = str(candidate.get("model", "base"))
             try:
-                require_whisper_model_available(model_name)
-            except WhisperModelUnavailableError:
+                backend, device, compute_type = self.job_backend_request(candidate)
+                resolved = resolve_backend_config(backend, model_name, device, compute_type)
+                registry_model = (
+                    pytorch_model_name(resolved.model)
+                    if resolved.backend == "pytorch"
+                    else resolved.model
+                )
+                require_whisper_model_available(
+                    registry_model, backend=resolved.backend
+                )
+            except (WhisperModelUnavailableError, TranscriptionBackendError) as exc:
                 now = utc_now()
+                message = (
+                    str(exc)
+                    if isinstance(exc, TranscriptionBackendError)
+                    else whisper_model_unavailable_message(model_name, backend)
+                )
                 self.jobs.update_one(
                     {"_id": candidate["_id"], **queued_filter},
                     {
@@ -155,7 +175,15 @@ class TranscriptionWorker:
                             "progress": 0,
                             "progress_stage": None,
                             "progress_message": None,
-                            "error": whisper_model_unavailable_message(model_name),
+                            "error": message,
+                            "structured_error": {
+                                "code": getattr(exc, "code", "model_unavailable"),
+                                "stage": "claim",
+                                "backend": backend,
+                                "device": device,
+                                "compute_type": compute_type,
+                                **(exc.structured_details() if isinstance(exc, TranscriptionBackendError) else {}),
+                            },
                             "completed_at": now,
                             "updated_at": now,
                         },
@@ -309,6 +337,7 @@ class TranscriptionWorker:
         error: str,
         model_load_metadata: dict[str, object] | None = None,
         error_traceback: str | None = None,
+        structured_error: dict[str, object] | None = None,
     ) -> bool:
         now = utc_now()
         fields: dict[str, object] = {
@@ -323,6 +352,8 @@ class TranscriptionWorker:
         }
         if model_load_metadata is not None:
             fields["model_load_metadata"] = model_load_metadata
+        if structured_error is not None:
+            fields["structured_error"] = structured_error
         result = self.jobs.update_one(
             {
                 "_id": job_id,
@@ -345,10 +376,13 @@ class TranscriptionWorker:
         )
         return result.modified_count == 1
 
-    def save_model_load_metadata(self, job_id: ObjectId) -> None:
+    def save_model_load_metadata(
+        self, job_id: ObjectId, *, language_code: str | None = None
+    ) -> None:
         metadata = self.adapter.last_load_metadata
         if metadata is None:
             return
+        metadata["language_code"] = language_code
         self.jobs.update_one(
             {
                 "_id": job_id,
@@ -359,7 +393,27 @@ class TranscriptionWorker:
         )
 
     @staticmethod
-    def cuda_oom_message(model_name: str) -> str:
+    def job_backend_request(job: dict) -> tuple[str, str, str]:
+        settings = get_application_settings().transcription
+        backend = str(job.get("transcription_backend", "pytorch"))
+        device = str(job.get("transcription_device", settings.device))
+        if "transcription_compute_type" in job:
+            compute_type = str(job["transcription_compute_type"])
+        elif not settings.fp16:
+            compute_type = "float32"
+        else:
+            compute_type = "auto"
+        return backend, device, compute_type
+
+    @staticmethod
+    def cuda_oom_message(model_name: str, backend: str = "pytorch", stage: str | None = None) -> str:
+        where = f" during {stage}" if stage else ""
+        if backend == "faster-whisper":
+            return (
+                f'CUDA memory is insufficient{where} for faster-whisper model "{model_name}". '
+                "Use compute type int8_float16 or int8, ensure no other backend model is active, "
+                "or select CPU if VRAM is still insufficient. The model cache was released and the worker remains available."
+            )
         model_order = ["tiny", "base", "small", "medium", "large"]
         normalized_model = model_name.lower()
         if normalized_model in model_order:
@@ -372,9 +426,9 @@ class TranscriptionWorker:
         else:
             recommendation = "Explicitly configure CPU processing"
         return (
-            f'CUDA out of memory while loading or running Whisper model "{model_name}". '
+            f'CUDA memory is insufficient{where} for PyTorch Whisper model "{model_name}". '
             "The GPU model cache was released and the worker remains available. "
-            f"{recommendation}, then retry the job."
+            f"{recommendation}, or use faster-whisper with int8_float16, then retry the job."
         )
 
     def cancel_current_job(self) -> bool:
@@ -507,16 +561,18 @@ class TranscriptionWorker:
             if not self.update_progress(job_id, 5, "loading_model", "Loading model"):
                 self.cancel_current_job()
                 return
-            transcription_settings = get_application_settings().transcription
             job_inference = inference_options(job, get_application_settings())
             model_name = str(job.get("model", "base"))
+            backend, device, compute_type = self.job_backend_request(job)
 
             self.adapter.load_model(
+                backend,
                 model_name,
+                device,
+                compute_type,
                 cancel_callback=self.should_cancel_current_job,
-                fp16=transcription_settings.fp16,
             )
-            self.save_model_load_metadata(job_id)
+            self.save_model_load_metadata(job_id, language_code=job_inference.language)
             if self.should_cancel_current_job() or not self.update_progress(job_id, 30, "loading_media", "Preparing media"):
                 self.cancel_current_job()
                 return
@@ -543,11 +599,13 @@ class TranscriptionWorker:
                 return
             result = self.adapter.transcribe(
                 audio_path,
+                backend=backend,
                 model_name=model_name,
+                device=device,
+                compute_type=compute_type,
                 language=job_inference.language,
                 progress_callback=on_whisper_progress,
                 cancel_callback=self.should_cancel_current_job,
-                fp16=transcription_settings.fp16,
                 beam_size=job_inference.beam_size,
                 best_of=job_inference.best_of,
                 temperature=job_inference.temperature,
@@ -556,6 +614,7 @@ class TranscriptionWorker:
                 condition_on_previous_text=job_inference.condition_on_previous_text,
                 no_speech_threshold=job_inference.no_speech_threshold,
             )
+            self.save_model_load_metadata(job_id, language_code=job_inference.language)
             result = apply_job_output_config(result, job)
             processing_stats = result.get("_processing_stats", {})
             processing_metadata = {
@@ -598,7 +657,9 @@ class TranscriptionWorker:
 
             translated_text: str | None = None
             if is_translation:
-                if self.should_cancel_current_job() or not self.update_progress(job_id, 90, "saving_result", "Saving transcript"):
+                if self.should_cancel_current_job() or not self.update_progress(
+                    job_id, 92, "translating", "Translating transcript"
+                ):
                     self.cancel_current_job()
                     return
                 translated_text = self.translation_adapter.translate(
@@ -607,7 +668,9 @@ class TranscriptionWorker:
                     cancel_callback=self.should_cancel_current_job,
                 )
 
-            if self.should_cancel_current_job() or not self.update_progress(job_id, 90, "saving_result", "Saving transcript"):
+            if self.should_cancel_current_job() or not self.update_progress(
+                job_id, 98, "saving_result", "Saving transcript"
+            ):
                 self.cancel_current_job()
                 return
             transcript_id = self.save_transcript(
@@ -620,9 +683,9 @@ class TranscriptionWorker:
                 logger.info("Completed job %s with transcript %s", job_id, transcript_id)
             elif self.cancel_current_job():
                 logger.info("Cancelled job %s after transcription", job_id)
-        except torch.cuda.OutOfMemoryError:
-            self.adapter.release_cache()
-            error = self.cuda_oom_message(str(job.get("model", "base")))
+        except BackendOutOfMemoryError as exc:
+            backend, device, compute_type = self.job_backend_request(job)
+            error = self.cuda_oom_message(str(job.get("model", "base")), backend, exc.stage)
             metadata = self.adapter.last_load_metadata
             if self.cancel_current_job():
                 logger.info("Cancelled job %s while handling CUDA OOM", job_id)
@@ -631,6 +694,15 @@ class TranscriptionWorker:
                 error,
                 model_load_metadata=metadata,
                 error_traceback=traceback.format_exc(),
+                structured_error={
+                    "code": exc.code,
+                    "stage": exc.stage,
+                    "backend": backend,
+                    "model": str(job.get("model", "base")),
+                    "device": device,
+                    "compute_type": compute_type,
+                    **exc.structured_details(),
+                },
             ):
                 logger.exception("Failed job %s: %s", job_id, error)
             elif self.cancel_current_job():
@@ -641,6 +713,37 @@ class TranscriptionWorker:
             else:
                 self.release_current_job()
                 logger.info("Released interrupted job %s", job_id)
+        except InvalidTranscriptionLanguage as exc:
+            if self.cancel_current_job():
+                logger.info("Cancelled job %s while handling invalid language", job_id)
+            elif self.fail_job(
+                job_id,
+                str(exc),
+                error_traceback=traceback.format_exc(),
+                structured_error=exc.structured_details(),
+            ):
+                logger.exception("Rejected job %s before inference: %s", job_id, exc)
+        except TranscriptionBackendError as exc:
+            backend, device, compute_type = self.job_backend_request(job)
+            error = str(exc)
+            if self.cancel_current_job():
+                logger.info("Cancelled job %s while handling backend error", job_id)
+            elif self.fail_job(
+                job_id,
+                error,
+                model_load_metadata=self.adapter.last_load_metadata,
+                error_traceback=traceback.format_exc(),
+                structured_error={
+                    "code": exc.code,
+                    "stage": exc.stage,
+                    "backend": backend,
+                    "model": str(job.get("model", "base")),
+                    "device": device,
+                    "compute_type": compute_type,
+                    **exc.structured_details(),
+                },
+            ):
+                logger.exception("Failed job %s: %s", job_id, error)
         except Exception as exc:
             error = f"{type(exc).__name__}: {exc}"
             error_traceback = traceback.format_exc()
@@ -670,7 +773,10 @@ class TranscriptionWorker:
                     "last_heartbeat": now,
                     "current_job": str(self.current_job_id) if self.current_job_id else None,
                     "effective_device": self.adapter.effective_device,
-                    "effective_device_setting": self.adapter.device_setting,
+                    "effective_device_setting": self.application_settings.transcription.device,
+                    "effective_backend_setting": self.application_settings.transcription.backend,
+                    "effective_compute_type_setting": self.application_settings.transcription.compute_type,
+                    "active_model_metadata": self.adapter.last_load_metadata,
                     "configured_concurrency": self.application_settings.transcription.maximum_concurrent_transcription_jobs,
                     "settings_version": latest_settings.version,
                     "dependency_versions": worker_dependency_versions(),
@@ -686,6 +792,7 @@ class TranscriptionWorker:
         logger.info("Worker %s is stopping", self.worker_id)
         self.stopping.set()
         self.release_current_job()
+        self.adapter.release_cache()
         self.report_runtime(force=True, stopped=True)
         raise SystemExit(0)
 

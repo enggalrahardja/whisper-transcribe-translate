@@ -8,11 +8,12 @@ from dataclasses import dataclass
 
 from ..models.job import AdvancedTranscriptionSettings
 from .job_glossaries import load_job_glossary
+from .transcription_languages import job_language_code
 
 
 @dataclass(frozen=True)
 class JobInferenceOptions:
-    language: str
+    language: str | None
     beam_size: int
     best_of: int | None
     temperature: float
@@ -33,7 +34,7 @@ def inference_options(job: dict, application_settings: object) -> JobInferenceOp
     transcription = application_settings.transcription
     if config is None:
         return JobInferenceOptions(
-            language=str(job.get("language", "auto")),
+            language=job_language_code(job),
             beam_size=transcription.beam_size,
             best_of=None,
             temperature=transcription.temperature,
@@ -49,7 +50,7 @@ def inference_options(job: dict, application_settings: object) -> JobInferenceOp
         glossary_prompt = load_job_glossary(config.glossary_id).prompt_context
         prompt = "\n".join(value for value in (prompt.strip(), glossary_prompt.strip()) if value)
     return JobInferenceOptions(
-        language=str(job.get("language", "auto")) if config.force_language else "auto",
+        language=job_language_code(job) if config.force_language else None,
         beam_size=accurate.beam_size if config.accurate_final else transcription.beam_size,
         best_of=accurate.best_of if config.accurate_final else None,
         temperature=accurate.temperature if config.accurate_final else transcription.temperature,

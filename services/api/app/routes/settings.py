@@ -6,8 +6,14 @@ from ..models.settings import (
     ApplicationSettingsResponse,
     AvailableWhisperModelResponse,
     CleanupResponse,
+    DeleteLocalFileResponse,
+    LocalFileResponse,
+    TranscriptionCapabilitiesResponse,
     UpdateApplicationSettingsRequest,
     WhisperModel,
+    ModelRegistryBackend,
+    WhisperModelActionRequest,
+    WhisperModelScanRequest,
     WhisperModelResponse,
     WorkerRuntimeResponse,
 )
@@ -17,6 +23,8 @@ from ..services.application_settings import (
     run_retention_cleanup,
     update_application_settings,
 )
+from ..services.media_files import delete_local_file, list_local_files
+from ..services.transcription_backends import runtime_capabilities
 from ..services.whisper_models import (
     WhisperModelActionConflict,
     cancel_whisper_model_download,
@@ -72,19 +80,94 @@ def cleanup() -> CleanupResponse:
     return run_retention_cleanup()
 
 
+@router.get("/transcription-capabilities", response_model=TranscriptionCapabilitiesResponse)
+def get_transcription_capabilities() -> TranscriptionCapabilitiesResponse:
+    return TranscriptionCapabilitiesResponse.model_validate(runtime_capabilities())
+
+
+@router.get("/local-files", response_model=list[LocalFileResponse])
+def get_local_files() -> list[LocalFileResponse]:
+    return list_local_files()
+
+
+@router.delete("/local-files/{media_file_id}", response_model=DeleteLocalFileResponse)
+def remove_local_file(
+    media_file_id: str,
+    principal: Principal = Depends(require_principal),
+) -> DeleteLocalFileResponse:
+    require_admin(principal)
+    result = delete_local_file(media_file_id)
+    audit_event(
+        "local_file_delete",
+        principal=principal,
+        metadata={"mediaFileId": result.id, "fileName": result.original_name, "bytesDeleted": result.bytes_deleted},
+    )
+    return result
+
+
 @router.get("/models", response_model=list[WhisperModelResponse])
-def get_models() -> list[WhisperModelResponse]:
-    return list_whisper_models()
+def get_models(backend: ModelRegistryBackend = "pytorch") -> list[WhisperModelResponse]:
+    return list_whisper_models(backend)
 
 
 @router.get("/models/available", response_model=list[AvailableWhisperModelResponse])
-def get_available_models() -> list[AvailableWhisperModelResponse]:
-    return list_available_whisper_models()
+def get_available_models(
+    backend: ModelRegistryBackend = "pytorch",
+) -> list[AvailableWhisperModelResponse]:
+    return list_available_whisper_models(backend)
 
 
 @router.post("/models/scan", response_model=list[WhisperModelResponse])
-async def scan_models() -> list[WhisperModelResponse]:
-    return await asyncio.to_thread(scan_whisper_models)
+async def scan_models(
+    payload: WhisperModelScanRequest | None = None,
+) -> list[WhisperModelResponse]:
+    return await asyncio.to_thread(
+        scan_whisper_models, payload.backend if payload else "pytorch"
+    )
+
+
+@router.post("/models/verify", response_model=WhisperModelResponse)
+async def verify_backend_model(payload: WhisperModelActionRequest) -> WhisperModelResponse:
+    try:
+        return await asyncio.to_thread(
+            verify_whisper_model, payload.model, backend=payload.backend
+        )
+    except WhisperModelActionConflict as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+@router.delete("/models", response_model=WhisperModelResponse)
+async def delete_backend_model(payload: WhisperModelActionRequest) -> WhisperModelResponse:
+    return await _delete_model(payload.model, payload.backend)
+
+
+@router.post(
+    "/models/download", response_model=WhisperModelResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def download_backend_model(payload: WhisperModelActionRequest) -> WhisperModelResponse:
+    return await _request_download(payload, retry=False)
+
+
+@router.post(
+    "/models/cancel", response_model=WhisperModelResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def cancel_backend_model(payload: WhisperModelActionRequest) -> WhisperModelResponse:
+    try:
+        return await asyncio.to_thread(
+            cancel_whisper_model_download, payload.model, payload.backend
+        )
+    except WhisperModelActionConflict as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+@router.post(
+    "/models/retry", response_model=WhisperModelResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def retry_backend_model(payload: WhisperModelActionRequest) -> WhisperModelResponse:
+    return await _request_download(payload, retry=True)
 
 
 @router.post("/models/{model}/verify", response_model=WhisperModelResponse)
@@ -97,8 +180,12 @@ async def verify_model(model: WhisperModel) -> WhisperModelResponse:
 
 @router.delete("/models/{model}", response_model=WhisperModelResponse)
 async def delete_model(model: WhisperModel) -> WhisperModelResponse:
+    return await _delete_model(model, "pytorch")
+
+
+async def _delete_model(model: WhisperModel, backend: ModelRegistryBackend) -> WhisperModelResponse:
     try:
-        return await asyncio.to_thread(delete_whisper_model, model)
+        return await asyncio.to_thread(delete_whisper_model, model, backend)
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)
@@ -120,10 +207,9 @@ async def delete_model(model: WhisperModel) -> WhisperModelResponse:
     status_code=status.HTTP_202_ACCEPTED,
 )
 async def download_model(model: WhisperModel) -> WhisperModelResponse:
-    try:
-        return await asyncio.to_thread(request_whisper_model_download, model)
-    except WhisperModelActionConflict as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    return await _request_download(
+        WhisperModelActionRequest(backend="pytorch", model=model), retry=False
+    )
 
 
 @router.post(
@@ -144,9 +230,20 @@ async def cancel_model_download(model: WhisperModel) -> WhisperModelResponse:
     status_code=status.HTTP_202_ACCEPTED,
 )
 async def retry_model_download(model: WhisperModel) -> WhisperModelResponse:
+    return await _request_download(
+        WhisperModelActionRequest(backend="pytorch", model=model), retry=True
+    )
+
+
+async def _request_download(
+    payload: WhisperModelActionRequest, *, retry: bool
+) -> WhisperModelResponse:
     try:
         return await asyncio.to_thread(
-            request_whisper_model_download, model, retry=True
+            request_whisper_model_download,
+            payload.model,
+            backend=payload.backend,
+            retry=retry,
         )
     except WhisperModelActionConflict as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc

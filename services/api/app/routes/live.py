@@ -5,14 +5,14 @@ import platform
 from datetime import datetime, timezone
 from time import monotonic
 
-from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, WebSocket, WebSocketDisconnect, status
 from pydantic import BaseModel, Field
 
 from ..config import get_settings
 from ..models.live import CreateLiveSessionRequest, LiveSessionResponse
 from ..security import (
-    Principal, authorize_owner, enforce_concurrent_limit, is_allowed_web_origin,
-    rate_limiter, rate_limit_or_raise, require_admin, require_principal,
+    Principal, allow_bursty_throughput, authorize_owner, enforce_concurrent_limit, is_allowed_web_origin,
+    rate_limit_or_raise, require_admin, require_principal,
     safe_error, validate_audio_frame_size, websocket_idle_expired, websocket_principal,
 )
 from ..services.production_hardening import audit_event
@@ -87,6 +87,8 @@ from ..services.pipeline_monitoring import latency_summary, quality_indicators, 
 from ..services.live_sessions import (
     create_live_session,
     count_active_sessions,
+    delete_live_session,
+    elapsed_session_seconds,
     fail_live_session,
     get_live_session,
     get_live_session_owner,
@@ -1492,6 +1494,17 @@ def get_session(session_id: str, principal: Principal = Depends(require_principa
     return get_live_session(session_id)
 
 
+@router.delete("/api/live/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_session(session_id: str, principal: Principal = Depends(require_principal)) -> Response:
+    authorize_owner(principal, get_live_session_owner(session_id))
+    delete_live_session(session_id)
+    _live_state_registry.remove(session_id)
+    for key in [item for item in _segment_glossaries if item[0] == session_id]:
+        _segment_glossaries.pop(key, None)
+    audit_event("session_delete", principal=principal, session_id=session_id)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @router.post("/api/live/sessions/{session_id}/stop", response_model=LiveSessionResponse)
 async def stop_session(session_id: str, principal: Principal = Depends(require_principal)) -> LiveSessionResponse:
     authorize_owner(principal, get_live_session_owner(session_id))
@@ -1577,7 +1590,7 @@ async def live_websocket(websocket: WebSocket, session_id: str) -> None:
     last_client_activity = monotonic()
     try:
         while True:
-            if (datetime.now(timezone.utc) - session.started_at).total_seconds() > _runtime_settings.limit_session_duration_seconds:
+            if elapsed_session_seconds(session.started_at) > _runtime_settings.limit_session_duration_seconds:
                 await _finish_pcm_session(session_id)
                 await asyncio.to_thread(stop_live_session, session_id)
                 audit_event("session_stop", principal=principal, session_id=session_id, metadata={"reason": "duration_limit"})
@@ -1610,7 +1623,13 @@ async def live_websocket(websocket: WebSocket, session_id: str) -> None:
                 except ValueError as exc:
                     await websocket.send_json(_event("error", message=str(exc)))
                     continue
-                if not rate_limiter.allow("audio_throughput", principal.user_id, _runtime_settings.rate_audio_bytes_per_second, window_seconds=1.0, cost=len(audio)):
+                if not allow_bursty_throughput(
+                    "audio_throughput",
+                    principal.user_id,
+                    _runtime_settings.rate_audio_bytes_per_second,
+                    cost=len(audio),
+                    maximum_burst=_runtime_settings.limit_audio_chunk_bytes,
+                ):
                     audit_event("rate_limit_rejection", principal=principal, session_id=session_id, outcome="rejected", metadata={"category": "audio_throughput"})
                     await websocket.close(code=1008, reason="Audio throughput limit reached")
                     return

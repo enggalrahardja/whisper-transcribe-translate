@@ -15,8 +15,9 @@ if str(PROJECT_ROOT) not in sys.path:
 from src import whisper  # noqa: E402
 
 from .whisper_models import resolve_available_whisper_model_path, whisper_model_usage  # noqa: E402
+from .transcription_languages import normalize_transcription_language  # noqa: E402
 
-SUPPORTED_MODELS = {"tiny", "base", "small", "medium", "large"}
+SUPPORTED_MODELS = {"tiny", "base", "small", "medium", "large", "large-v3", "turbo"}
 
 
 class WhisperAdapter:
@@ -184,7 +185,7 @@ class WhisperAdapter:
         self,
         audio_path: Path,
         model_name: str,
-        language: str,
+        language: str | None,
         progress_callback: Callable[[int], None] | None = None,
         cancel_callback: Callable[[], bool] | None = None,
         fp16: bool | None = None,
@@ -198,7 +199,7 @@ class WhisperAdapter:
     ) -> dict:
         with self._operation_lock():
             model = self._load_model_locked(model_name, cancel_callback, fp16)
-            selected_language = None if language == "auto" else language
+            selected_language = normalize_transcription_language(language)
             try:
                 with whisper_model_usage(model_name, "model-inference"):
                     result = model.transcribe(

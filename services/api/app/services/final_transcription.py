@@ -20,6 +20,7 @@ from .glossary import (
 from .whisper_adapter import WhisperAdapter
 from .whisper_model_metadata import WHISPER_MODEL_METADATA
 from .whisper_models import resolve_available_whisper_model_path
+from .transcription_languages import normalize_transcription_language
 
 
 def utc_now() -> datetime:
@@ -228,6 +229,7 @@ class PersistentLocalFinalTranscriber:
         timeout_seconds: float,
     ) -> FinalTranscriptionResult:
         deadline = monotonic() + timeout_seconds
+        language_code = normalize_transcription_language(request.language)
         temporary_path: Path | None = None
         started = perf_counter()
         try:
@@ -244,7 +246,7 @@ class PersistentLocalFinalTranscriber:
             result = self.adapter.transcribe(
                 temporary_path,
                 model_name=self.config.model,
-                language=request.language,
+                language=language_code,
                 cancel_callback=lambda: monotonic() >= deadline,
                 fp16=self._uses_fp16(),
                 beam_size=self.config.beam_size,
@@ -271,7 +273,7 @@ class PersistentLocalFinalTranscriber:
         if not raw_text:
             raise ValueError("Accurate final transcription returned empty text")
         correction = (
-            request.glossary.correct(raw_text, language=request.language)
+            request.glossary.correct(raw_text, language=language_code or "auto")
             if request.glossary is not None
             else None
         )
@@ -285,7 +287,7 @@ class PersistentLocalFinalTranscriber:
                 "text": (
                     request.glossary.correct(
                         str(segment.get("text", "")).strip(),
-                        language=request.language,
+                        language=language_code or "auto",
                         record_metrics=False,
                     ).corrected_text
                     if request.glossary is not None
@@ -307,7 +309,7 @@ class PersistentLocalFinalTranscriber:
                 checkpoint_sha256=checkpoint.expected_checksum,
                 device=self.adapter.effective_device,
                 compute_type="float16" if self._uses_fp16() else "float32",
-                language=str(result.get("language") or request.language),
+                language=str(result.get("language") or language_code or "auto"),
                 beam_size=self.config.beam_size,
                 timestamps=timestamps,
                 latency_ms=latency_ms,

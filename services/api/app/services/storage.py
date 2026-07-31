@@ -4,7 +4,7 @@ from uuid import uuid4
 from fastapi import HTTPException, UploadFile, status
 
 from ..config import get_settings
-from .application_settings import get_application_settings
+from .application_settings import effective_storage_root, effective_storage_roots, get_application_settings
 
 ALLOWED_EXTENSIONS = {
     ".wav": "audio",
@@ -27,9 +27,8 @@ CHUNK_SIZE = 1024 * 1024
 
 
 def resolve_storage_file(path_value: str | Path, *, must_exist: bool = True) -> Path:
-    storage_root = Path(get_settings().storage_root).resolve()
     path = Path(path_value).resolve()
-    if not path.is_relative_to(storage_root):
+    if not any(path.is_relative_to(root) for root in effective_storage_roots()):
         raise ValueError("Media path is outside the configured storage root")
     if must_exist and not path.is_file():
         raise FileNotFoundError(path)
@@ -65,7 +64,7 @@ def _matches_media_signature(extension: str, header: bytes) -> bool:
 
 
 def get_upload_directory() -> Path:
-    directory = Path(get_settings().storage_root).resolve() / "uploads"
+    directory = effective_storage_root() / "uploads"
     directory.mkdir(parents=True, exist_ok=True)
     return directory
 

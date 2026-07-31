@@ -172,6 +172,9 @@ class GlossaryPromptIntegrationTests(unittest.TestCase):
             "status": "active",
             "language": "en",
             "model": "base",
+            "transcription_backend": "faster-whisper",
+            "transcription_device": "cpu",
+            "transcription_compute_type": "int8",
             "started_at": now,
             "ended_at": None,
             "duration": 0,
@@ -209,6 +212,9 @@ class GlossaryPromptIntegrationTests(unittest.TestCase):
                 glossary=self.snapshot,
             )
         self.assertIn("SMARTHub", transcribe.call_args.kwargs["initial_prompt"])
+        self.assertEqual(transcribe.call_args.kwargs["backend"], "faster-whisper")
+        self.assertEqual(transcribe.call_args.kwargs["device"], "cpu")
+        self.assertEqual(transcribe.call_args.kwargs["compute_type"], "int8")
         self.assertEqual(detail.raw_text, "Smart Hub")
         self.assertEqual(detail.corrected_text, "SMARTHub")
         self.assertEqual(len(detail.corrections), 1)

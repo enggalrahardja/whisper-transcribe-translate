@@ -162,6 +162,23 @@ class SlidingWindowLimiter:
 rate_limiter = SlidingWindowLimiter()
 
 
+def allow_bursty_throughput(
+    category: str,
+    key: str,
+    rate_per_second: int,
+    *,
+    cost: int,
+    maximum_burst: int,
+    window_seconds: float = 60.0,
+    limiter: SlidingWindowLimiter = rate_limiter,
+) -> bool:
+    """Enforce an average byte rate while allowing one valid frame as burst capacity."""
+    if cost < 0 or cost > maximum_burst:
+        return False
+    capacity = int(rate_per_second * window_seconds) + maximum_burst
+    return limiter.allow(category, key, capacity, window_seconds=window_seconds, cost=cost)
+
+
 def rate_limit_or_raise(category: str, key: str, limit: int, *, window_seconds: float = 60.0, cost: int = 1) -> None:
     if not rate_limiter.allow(category, key, limit, window_seconds=window_seconds, cost=cost):
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Rate limit exceeded")

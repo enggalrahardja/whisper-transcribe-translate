@@ -258,7 +258,15 @@ export default function SettingsPage() {
       if (!current) return current;
       const transcription = { ...current.transcription, [field]: value };
       const general = { ...current.general };
+      const liveTranscription = { ...current.live_transcription };
       const backend = transcription.backend as TranscriptionBackendName;
+      const preset = capabilities?.recommended_by_backend[backend];
+      if (field === "backend" && preset) {
+        transcription.device = preset.device;
+        transcription.compute_type = preset.compute_type;
+        general.default_whisper_model = preset.model;
+        liveTranscription.default_live_model = preset.model;
+      }
       const requestedDevice = transcription.device as TranscriptionDeviceName;
       const effectiveDevice = requestedDevice === "auto"
         ? (capabilities?.devices.some((item) => item.id === "cuda" && item.available) ? "cuda" : "cpu")
@@ -272,7 +280,7 @@ export default function SettingsPage() {
           : valid[0] ?? "auto";
       }
       if (backend === "faster-whisper" && general.default_whisper_model === "large") general.default_whisper_model = "large-v3";
-      return { ...current, general, transcription };
+      return { ...current, general, transcription, live_transcription: liveTranscription };
     });
     setFeedback(null);
   }

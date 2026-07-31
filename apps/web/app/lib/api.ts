@@ -12,6 +12,7 @@ export type TranscriptionCapabilities = {
   compute_types: Record<TranscriptionBackendName, Record<"cpu" | "cuda", TranscriptionComputeType[]>>;
   models: WhisperModelName[];
   recommended: { backend: TranscriptionBackendName; model: WhisperModelName; device: "cpu" | "cuda"; compute_type: TranscriptionComputeType };
+  recommended_by_backend: Record<TranscriptionBackendName, { backend: TranscriptionBackendName; model: WhisperModelName; device: "cpu" | "cuda"; compute_type: TranscriptionComputeType }>;
 };
 export type WhisperModelStatus = "not_downloaded" | "downloading" | "available" | "failed" | "corrupted" | "deleting";
 
@@ -183,6 +184,9 @@ export type LiveSession = {
   status: LiveSessionStatus;
   language: string;
   model: string;
+  transcription_backend: TranscriptionBackendName;
+  transcription_device: TranscriptionDeviceName;
+  transcription_compute_type: TranscriptionComputeType;
   started_at: string;
   ended_at: string | null;
   duration: number;

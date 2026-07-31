@@ -16,9 +16,9 @@ from .glossary import (
     combine_prompt,
 )
 from .live_sessions import append_live_result, claim_live_chunk
-from .whisper_adapter import WhisperAdapter
+from .transcription_backends import TranscriptionBackendManager
 
-_adapter = WhisperAdapter()
+_adapter = TranscriptionBackendManager()
 _adapter_lock = threading.Lock()
 
 
@@ -108,6 +108,9 @@ def process_live_chunk_detailed(
             status=document["status"],
             language=document["language"],
             model=document["model"],
+            transcription_backend=document.get("transcription_backend", "pytorch"),
+            transcription_device=document.get("transcription_device", "auto"),
+            transcription_compute_type=document.get("transcription_compute_type", "auto"),
             started_at=document["started_at"],
             ended_at=document.get("ended_at"),
             duration=float(document.get("duration", 0)),
@@ -129,9 +132,11 @@ def process_live_chunk_detailed(
             glossary_context = glossary.prompt_context if glossary is not None else ""
             result = _adapter.transcribe(
                 temporary_path,
+                backend=document.get("transcription_backend", "pytorch"),
                 model_name=document["model"],
+                device=document.get("transcription_device", "auto"),
+                compute_type=document.get("transcription_compute_type", "auto"),
                 language=document["language"],
-                fp16=transcription_settings.fp16,
                 beam_size=transcription_settings.beam_size,
                 temperature=transcription_settings.temperature,
                 initial_prompt=combine_prompt(

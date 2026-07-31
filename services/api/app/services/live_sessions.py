@@ -6,6 +6,8 @@ from pymongo import ASCENDING, DESCENDING, ReturnDocument
 
 from ..database import get_database
 from ..models.live import CreateLiveSessionRequest, LiveSessionResponse
+from .pipeline_persistence import COLLECTIONS as PIPELINE_COLLECTIONS
+from .transcription_backends import TranscriptionBackendError, resolve_backend_config
 from .whisper_models import whisper_model_usage
 from .transcription_languages import normalize_transcription_language
 
@@ -18,6 +20,10 @@ def utc_now() -> datetime:
 
 def _as_utc(value: datetime) -> datetime:
     return value.replace(tzinfo=timezone.utc) if value.tzinfo is None else value.astimezone(timezone.utc)
+
+
+def elapsed_session_seconds(started_at: datetime, *, now: datetime | None = None) -> float:
+    return max(0.0, (_as_utc(now or utc_now()) - _as_utc(started_at)).total_seconds())
 
 
 def ensure_live_session_indexes() -> None:
@@ -33,6 +39,9 @@ def _serialize(document: dict) -> LiveSessionResponse:
         status=document["status"],
         language=document["language"],
         model=document["model"],
+        transcription_backend=document.get("transcription_backend", "pytorch"),
+        transcription_device=document.get("transcription_device", "auto"),
+        transcription_compute_type=document.get("transcription_compute_type", "auto"),
         started_at=document["started_at"],
         ended_at=document.get("ended_at"),
         duration=float(document.get("duration", 0)),
@@ -54,7 +63,20 @@ def _get_document(session_id: str) -> dict:
 
 def create_live_session(payload: CreateLiveSessionRequest, *, owner_id: str = "development-user") -> LiveSessionResponse:
     language_code = normalize_transcription_language(payload.language)
-    with whisper_model_usage(payload.model, "live-session-create"):
+    try:
+        resolve_backend_config(
+            payload.transcription_backend,
+            payload.model,
+            payload.transcription_device,
+            payload.transcription_compute_type,
+        )
+    except TranscriptionBackendError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    with whisper_model_usage(
+        payload.model,
+        "live-session-create",
+        backend=payload.transcription_backend,
+    ):
         now = utc_now()
         document = {
             "session_id": uuid4().hex,
@@ -62,6 +84,9 @@ def create_live_session(payload: CreateLiveSessionRequest, *, owner_id: str = "d
             "status": "active",
             "language": language_code or "auto",
             "model": payload.model,
+            "transcription_backend": payload.transcription_backend,
+            "transcription_device": payload.transcription_device,
+            "transcription_compute_type": payload.transcription_compute_type,
             "started_at": now,
             "ended_at": None,
             "duration": 0.0,
@@ -92,6 +117,25 @@ def list_live_sessions(limit: int = 20, *, owner_id: str | None = None) -> list[
 def get_live_session_owner(session_id: str) -> str | None:
     document = _get_document(session_id)
     return document.get("owner_id")
+
+
+def delete_live_session(session_id: str) -> bool:
+    database = get_database()
+    collection = database[COLLECTION_NAME]
+    document = collection.find_one_and_delete(
+        {"session_id": session_id, "status": {"$in": ["completed", "failed"]}}
+    )
+    if document is None:
+        current = collection.find_one({"session_id": session_id}, {"status": 1})
+        if current is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Live session not found")
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Active or paused live sessions cannot be deleted",
+        )
+    for collection_name in PIPELINE_COLLECTIONS.values():
+        database[collection_name].delete_many({"sessionId": session_id})
+    return True
 
 
 def count_active_sessions(*, owner_id: str | None = None) -> int:

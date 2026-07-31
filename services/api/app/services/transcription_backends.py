@@ -159,6 +159,22 @@ def runtime_capabilities() -> dict[str, object]:
         "cpu": list(COMPUTE_MATRIX["pytorch"]["cpu"]),
         "cuda": list(COMPUTE_MATRIX["pytorch"]["cuda"]) if torch_cuda_available else [],
     }
+    pytorch_device = "cuda" if torch_cuda_available else "cpu"
+    faster_device = "cuda" if ctranslate_cuda_available else "cpu"
+    recommended_by_backend = {
+        "pytorch": {
+            "backend": "pytorch",
+            "model": "medium" if torch_cuda_available else "small",
+            "device": pytorch_device,
+            "compute_type": "float16" if torch_cuda_available else "float32",
+        },
+        "faster-whisper": {
+            "backend": "faster-whisper",
+            "model": "large-v3" if ctranslate_cuda_available else "medium",
+            "device": faster_device,
+            "compute_type": "int8_float16" if ctranslate_cuda_available else "int8",
+        },
+    }
     return {
         "backends": [
             {"id": "pytorch", "label": "Whisper PyTorch", "available": True, "reason": None},
@@ -173,12 +189,8 @@ def runtime_capabilities() -> dict[str, object]:
             "faster-whisper": faster_compute,
         },
         "models": list(MODELS),
-        "recommended": {
-            "backend": "faster-whisper",
-            "model": "large-v3",
-            "device": "cuda",
-            "compute_type": "int8_float16",
-        },
+        "recommended": recommended_by_backend["faster-whisper"],
+        "recommended_by_backend": recommended_by_backend,
     }
 
 

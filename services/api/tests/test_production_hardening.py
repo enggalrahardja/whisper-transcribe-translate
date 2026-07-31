@@ -10,7 +10,7 @@ from fastapi import HTTPException
 
 from app.config import Settings, validate_startup_configuration
 from app.security import (
-    Principal, SlidingWindowLimiter, authenticate_token, authorize_owner,
+    Principal, SlidingWindowLimiter, allow_bursty_throughput, authenticate_token, authorize_owner,
     enforce_concurrent_limit, is_allowed_web_origin, redact_value, safe_error,
     validate_audio_frame_size, websocket_idle_expired, websocket_principal,
 )
@@ -115,6 +115,25 @@ class LimitAndInputTests(unittest.TestCase):
             bounded.allow("session", user, 1)
         self.assertEqual(len(bounded._events), 2)
 
+    def test_audio_rate_limit_allows_valid_wav_chunk_bursts(self):
+        now = [0.0]
+        limiter = SlidingWindowLimiter(lambda: now[0])
+        wav_chunk_size = 288_044
+        for _ in range(24):
+            self.assertTrue(allow_bursty_throughput(
+                "audio", "alice", 128_000,
+                cost=wav_chunk_size,
+                maximum_burst=524_288,
+                limiter=limiter,
+            ))
+            now[0] += 2.5
+        self.assertFalse(allow_bursty_throughput(
+            "audio", "alice", 128_000,
+            cost=524_289,
+            maximum_burst=524_288,
+            limiter=limiter,
+        ))
+
     def test_pcm_metadata_is_strict(self):
         valid = {"type":"pcm_chunk", "sessionId":"a" * 32, "sequence":0, "captureTimestampMs":1.0, "sampleRate":16000, "channelCount":1, "chunkDurationMs":200.0, "byteLength":6400}
         self.assertEqual(PcmChunkMetadata.from_payload(valid).byte_length, 6400)
@@ -152,6 +171,25 @@ class LimitAndInputTests(unittest.TestCase):
         ):
             create_live_session(CreateLiveSessionRequest(), owner_id="alice")
         self.assertEqual(collection.inserted["owner_id"], "alice")
+        self.assertEqual(collection.inserted["transcription_backend"], "pytorch")
+
+    def test_session_creation_persists_selected_transcription_runtime(self):
+        collection = CaptureCollection()
+        payload = CreateLiveSessionRequest(
+            transcription_backend="faster-whisper",
+            transcription_device="cpu",
+            transcription_compute_type="int8",
+        )
+        with patch("app.services.live_sessions.get_database", return_value=CaptureDatabase(collection)), patch(
+            "app.services.live_sessions.resolve_backend_config"
+        ), patch(
+            "app.services.live_sessions.whisper_model_usage", return_value=nullcontext()
+        ) as usage:
+            session = create_live_session(payload, owner_id="alice")
+        self.assertEqual(session.transcription_backend, "faster-whisper")
+        self.assertEqual(session.transcription_device, "cpu")
+        self.assertEqual(session.transcription_compute_type, "int8")
+        usage.assert_called_once_with("base", "live-session-create", backend="faster-whisper")
 
 
 class RedactionRetentionAndReadinessTests(unittest.TestCase):

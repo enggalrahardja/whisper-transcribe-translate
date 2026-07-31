@@ -93,17 +93,24 @@ export default function TranscribePage() {
   );
 
   function updateRuntime(nextBackend: TranscriptionBackendName, nextDevice: TranscriptionDeviceName) {
+    const backendChanged = nextBackend !== backend;
+    const preset = capabilities?.recommended_by_backend[nextBackend];
+    const selectedDevice = backendChanged && preset ? preset.device : nextDevice;
     setBackend(nextBackend);
     void getAvailableWhisperModels(undefined, nextBackend).then((models) => {
       setAvailableModels(models);
-      setModel((current) => models.some((item) => item.model === current) ? current : models[0]?.model ?? "");
+      setModel((current) => backendChanged && preset && models.some((item) => item.model === preset.model)
+        ? preset.model
+        : models.some((item) => item.model === current) ? current : models[0]?.model ?? "");
     }).catch((error) => setModelsError(error instanceof Error ? error.message : "Available Whisper models could not be loaded"));
-    setDevice(nextDevice);
-    const resolvedDevice = nextDevice === "auto"
+    setDevice(selectedDevice);
+    const resolvedDevice = selectedDevice === "auto"
       ? (capabilities?.devices.some((item) => item.id === "cuda" && item.available) ? "cuda" : "cpu")
-      : nextDevice;
+      : selectedDevice;
     const valid = capabilities?.compute_types[nextBackend]?.[resolvedDevice] ?? [];
-    if (nextBackend === "faster-whisper" && resolvedDevice === "cuda" && valid.includes("int8_float16") && computeType === "auto") {
+    if (backendChanged && preset && valid.includes(preset.compute_type)) {
+      setComputeType(preset.compute_type);
+    } else if (nextBackend === "faster-whisper" && resolvedDevice === "cuda" && valid.includes("int8_float16") && computeType === "auto") {
       setComputeType("int8_float16");
     } else if (computeType !== "auto" && !valid.includes(computeType)) {
       setComputeType(nextBackend === "faster-whisper" && resolvedDevice === "cuda" && valid.includes("int8_float16") ? "int8_float16" : valid[0] ?? "auto");

@@ -61,15 +61,21 @@ export default function TranslatePage() {
   const selectableModels: WhisperModelName[] = availableModels.map((item) => item.model);
 
   function updateRuntime(nextBackend: TranscriptionBackendName, nextDevice: TranscriptionDeviceName) {
+    const backendChanged = nextBackend !== backend;
+    const preset = capabilities?.recommended_by_backend[nextBackend];
+    const selectedDevice = backendChanged && preset ? preset.device : nextDevice;
     setBackend(nextBackend);
     void getAvailableWhisperModels(undefined, nextBackend).then((models) => {
       setAvailableModels(models);
-      setModel((current) => models.some((item) => item.model === current) ? current : models[0]?.model ?? "");
+      setModel((current) => backendChanged && preset && models.some((item) => item.model === preset.model)
+        ? preset.model
+        : models.some((item) => item.model === current) ? current : models[0]?.model ?? "");
     }).catch((loadError) => setModelsError(loadError instanceof Error ? loadError.message : "Available Whisper models could not be loaded"));
-    setDevice(nextDevice);
-    const resolvedDevice = nextDevice === "auto" ? (capabilities?.devices.some((item) => item.id === "cuda" && item.available) ? "cuda" : "cpu") : nextDevice;
+    setDevice(selectedDevice);
+    const resolvedDevice = selectedDevice === "auto" ? (capabilities?.devices.some((item) => item.id === "cuda" && item.available) ? "cuda" : "cpu") : selectedDevice;
     const valid = capabilities?.compute_types[nextBackend]?.[resolvedDevice] ?? [];
-    if (nextBackend === "faster-whisper" && resolvedDevice === "cuda" && valid.includes("int8_float16") && computeType === "auto") setComputeType("int8_float16");
+    if (backendChanged && preset && valid.includes(preset.compute_type)) setComputeType(preset.compute_type);
+    else if (nextBackend === "faster-whisper" && resolvedDevice === "cuda" && valid.includes("int8_float16") && computeType === "auto") setComputeType("int8_float16");
     else if (computeType !== "auto" && !valid.includes(computeType)) setComputeType(valid[0] ?? "auto");
   }
 

@@ -193,12 +193,15 @@ def update_application_settings(payload: UpdateApplicationSettingsRequest) -> Ap
                 f"{values.general.default_whisper_model}"
             ),
         )
-    if not is_whisper_model_available(values.live_transcription.default_live_model):
+    if not is_whisper_model_available(
+        values.live_transcription.default_live_model,
+        backend=values.transcription.backend,
+    ):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=(
                 "Default live Whisper model is not available locally: "
-                f"{values.live_transcription.default_live_model}"
+                f"{values.transcription.backend}:{values.live_transcription.default_live_model}"
             ),
         )
     document = collection.find_one_and_update(

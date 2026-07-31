@@ -15,6 +15,7 @@ from app.services.transcription_backends import (
     TranscriptionOptions,
     canonical_model_name,
     resolve_backend_config,
+    runtime_capabilities,
 )
 from app.services.cuda12_runtime import (
     Cuda12RuntimeFailure,
@@ -39,10 +40,34 @@ def capabilities(*, cuda=True):
         },
         "models": ["tiny", "base", "small", "medium", "large-v3"],
         "recommended": {"backend": "faster-whisper", "model": "large-v3", "device": "cuda", "compute_type": "int8_float16"},
+        "recommended_by_backend": {
+            "pytorch": {"backend": "pytorch", "model": "medium", "device": "cuda", "compute_type": "float16"},
+            "faster-whisper": {"backend": "faster-whisper", "model": "large-v3", "device": "cuda", "compute_type": "int8_float16"},
+        },
     }
 
 
 class BackendValidationTests(unittest.TestCase):
+    def test_gpu_runtime_recommends_safe_backend_specific_presets(self):
+        ctranslate2 = SimpleNamespace(
+            get_cuda_device_count=lambda: 1,
+            get_supported_compute_types=lambda device: (
+                {"float16", "int8_float16", "int8"} if device == "cuda" else {"int8", "float32"}
+            ),
+        )
+        with (
+            patch("app.services.transcription_backends._faster_whisper_available", return_value=(True, None)),
+            patch("app.services.transcription_backends.torch.cuda.is_available", return_value=True),
+            patch.dict(sys.modules, {"ctranslate2": ctranslate2}),
+        ):
+            presets = runtime_capabilities()["recommended_by_backend"]
+        self.assertEqual(presets["pytorch"], {
+            "backend": "pytorch", "model": "medium", "device": "cuda", "compute_type": "float16",
+        })
+        self.assertEqual(presets["faster-whisper"], {
+            "backend": "faster-whisper", "model": "large-v3", "device": "cuda", "compute_type": "int8_float16",
+        })
+
     def test_large_alias_maps_to_large_v3(self):
         self.assertEqual(canonical_model_name("large"), "large-v3")
 

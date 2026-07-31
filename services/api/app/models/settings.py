@@ -238,3 +238,4 @@ class TranscriptionCapabilitiesResponse(BaseModel):
     compute_types: dict[str, dict[str, list[str]]]
     models: list[str]
     recommended: dict[str, str]
+    recommended_by_backend: dict[str, dict[str, str]]

@@ -7,6 +7,7 @@ const ports = [3000, 8000];
 const gracefulShutdownMs = 5000;
 const forcedShutdownMs = 3000;
 const projectRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const projectDevCommand = /(?:scripts\/dev(?:-api|-worker|-model-downloader)?\.mjs|pnpm(?:\.cjs)?\s+(?:run\s+)?dev(?::(?:web|api|worker|model-downloader))?|next(?:\/dist\/bin\/next)?\s+dev|uvicorn\s+app\.main:app\s+--reload|-m\s+app\.(?:worker|model_downloader))/;
 
 function findPidsOnWindows(port) {
   try {
@@ -108,6 +109,84 @@ function terminatePid(pid, force = false) {
   }
 }
 
+function listProcesses() {
+  if (process.platform === "win32") {
+    try {
+      const output = execFileSync("powershell", [
+        "-NoProfile",
+        "-Command",
+        "Get-CimInstance Win32_Process | ForEach-Object { \"$($_.ProcessId)`t$($_.ParentProcessId)`t$($_.CommandLine)\" }",
+      ], { encoding: "utf8" });
+      return output.split(/\r?\n/).map((line) => {
+        const [pid, ppid, ...command] = line.split("\t");
+        return { pid: Number(pid), ppid: Number(ppid), command: command.join("\t") };
+      }).filter((item) => Number.isInteger(item.pid) && item.pid > 0);
+    } catch {
+      return [];
+    }
+  }
+  try {
+    const output = execFileSync("ps", ["-eo", "pid=,ppid=,command="], { encoding: "utf8" });
+    return output.split(/\r?\n/).map((line) => {
+      const match = line.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/);
+      return match ? { pid: Number(match[1]), ppid: Number(match[2]), command: match[3] } : null;
+    }).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function currentProcessFamily(processes) {
+  const byPid = new Map(processes.map((item) => [item.pid, item]));
+  const protectedPids = new Set([process.pid]);
+  let current = byPid.get(process.pid);
+  while (current?.ppid && !protectedPids.has(current.ppid)) {
+    protectedPids.add(current.ppid);
+    current = byPid.get(current.ppid);
+  }
+  return protectedPids;
+}
+
+function processExists(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForPidsToExit(pids, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (pids.every((pid) => !processExists(pid))) return true;
+    await delay(150);
+  }
+  return pids.every((pid) => !processExists(pid));
+}
+
+async function cleanupStaleProjectDevProcesses() {
+  const processes = listProcesses();
+  const protectedPids = currentProcessFamily(processes);
+  const stalePids = processes
+    .filter((item) => !protectedPids.has(item.pid))
+    .filter((item) => projectDevCommand.test(item.command) && isProjectProcess(String(item.pid)))
+    .map((item) => item.pid);
+  if (stalePids.length === 0) {
+    console.log("No stale project development processes found.");
+    return;
+  }
+  console.log(`Stopping ${stalePids.length} stale project development process(es).`);
+  for (const pid of stalePids) terminatePid(String(pid));
+  if (!(await waitForPidsToExit(stalePids, gracefulShutdownMs))) {
+    for (const pid of stalePids.filter(processExists)) terminatePid(String(pid), true);
+  }
+  if (!(await waitForPidsToExit(stalePids, forcedShutdownMs))) {
+    console.error(`Development PID(s) could not be stopped: ${stalePids.filter(processExists).join(", ")}`);
+    process.exit(1);
+  }
+}
+
 function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
@@ -122,6 +201,8 @@ async function waitForPortToBeFree(port, timeoutMs) {
 
   return findPids(port).length === 0;
 }
+
+await cleanupStaleProjectDevProcesses();
 
 for (const port of ports) {
   const existingPids = findPids(port);
@@ -180,19 +261,20 @@ const children = commands.map(({ name, command, args }) => {
 });
 
 let stopping = false;
+let shutdownPromise = null;
 
-function stopChild(child) {
+function stopChild(child, force = false) {
   if (!child.pid) return;
 
   try {
     if (process.platform === "win32") {
       execFileSync("taskkill", ["/PID", String(child.pid), "/T", "/F"], { stdio: "ignore" });
     } else {
-      process.kill(-child.pid, "SIGTERM");
+      process.kill(-child.pid, force ? "SIGKILL" : "SIGTERM");
     }
   } catch {
     try {
-      child.kill("SIGTERM");
+      child.kill(force ? "SIGKILL" : "SIGTERM");
     } catch {
       // Already stopped.
     }
@@ -200,17 +282,26 @@ function stopChild(child) {
 }
 
 function shutdown(code = 0) {
-  if (stopping) return;
+  if (shutdownPromise) return shutdownPromise;
   stopping = true;
-  for (const child of children) stopChild(child);
-  process.exit(code);
+  shutdownPromise = (async () => {
+    const running = children.filter((child) => child.exitCode === null && child.signalCode === null);
+    for (const child of running) stopChild(child);
+    const pids = running.map((child) => child.pid).filter(Boolean);
+    if (!(await waitForPidsToExit(pids, gracefulShutdownMs))) {
+      for (const child of running.filter((item) => item.pid && processExists(item.pid))) stopChild(child, true);
+      await waitForPidsToExit(pids, forcedShutdownMs);
+    }
+    process.exit(code);
+  })();
+  return shutdownPromise;
 }
 
-process.on("SIGINT", () => shutdown(0));
-process.on("SIGTERM", () => shutdown(0));
+process.on("SIGINT", () => void shutdown(0));
+process.on("SIGTERM", () => void shutdown(0));
 process.on("exit", () => {
   if (!stopping) {
     stopping = true;
-    for (const child of children) stopChild(child);
+    for (const child of children) stopChild(child, true);
   }
 });

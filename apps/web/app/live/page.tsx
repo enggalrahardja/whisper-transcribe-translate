@@ -2,7 +2,18 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { apiBaseUrl, ApplicationSettings, AvailableWhisperModel, getAvailableWhisperModels, LiveSession, websocketBaseUrl } from "../lib/api";
+import {
+  apiBaseUrl,
+  ApplicationSettings,
+  AvailableWhisperModel,
+  getAvailableWhisperModels,
+  LiveSession,
+  TranscriptionBackendName,
+  TranscriptionCapabilities,
+  TranscriptionComputeType,
+  TranscriptionDeviceName,
+  websocketBaseUrl,
+} from "../lib/api";
 import { languageLabel, sourceLanguages } from "../lib/languages";
 import { PcmAudioCapture } from "./pcm-capture";
 import { PcmTransportMetrics, PcmWebSocketTransport } from "./pcm-transport";
@@ -445,6 +456,10 @@ export default function LivePage() {
   const [newTranscriptAvailable, setNewTranscriptAvailable] = useState(false);
   const [persistenceDegraded, setPersistenceDegraded] = useState(false);
   const [model, setModel] = useState("");
+  const [backend, setBackend] = useState<TranscriptionBackendName>("pytorch");
+  const [device, setDevice] = useState<TranscriptionDeviceName>("auto");
+  const [computeType, setComputeType] = useState<TranscriptionComputeType>("auto");
+  const [capabilities, setCapabilities] = useState<TranscriptionCapabilities | null>(null);
   const [availableModels, setAvailableModels] = useState<AvailableWhisperModel[]>([]);
   const [modelsLoading, setModelsLoading] = useState(true);
   const [modelsError, setModelsError] = useState("");
@@ -1019,7 +1034,13 @@ export default function LivePage() {
       const response = await fetch(`${apiBaseUrl}/api/live/sessions`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ language, model }),
+        body: JSON.stringify({
+          language,
+          model,
+          transcription_backend: backend,
+          transcription_device: device,
+          transcription_compute_type: computeType,
+        }),
       });
       if (!response.ok) throw new Error(await responseError(response, "Live session could not be created"));
       created = await response.json() as LiveSession;
@@ -1159,35 +1180,47 @@ export default function LivePage() {
 
   useEffect(() => {
     const controller = new AbortController();
-    const refreshModels = () => void getAvailableWhisperModels(controller.signal).then((models) => {
+    const refreshModels = () => void getAvailableWhisperModels(controller.signal, backend).then((models) => {
       setAvailableModels(models);
-      setModel((current) => models.some((item) => item.model === current) ? current : "");
-    }).catch(() => undefined);
+      setModel((current) => models.some((item) => item.model === current)
+        ? current
+        : models.some((item) => item.model === liveSettingsRef.current.default_live_model)
+          ? liveSettingsRef.current.default_live_model
+          : models[0]?.model ?? "");
+      setModelsError("");
+    }).catch((loadError) => {
+      if (!(loadError instanceof DOMException && loadError.name === "AbortError")) {
+        setModelsError(loadError instanceof Error ? loadError.message : "Available Whisper models could not be loaded");
+      }
+    }).finally(() => setModelsLoading(false));
+    setModelsLoading(true);
+    refreshModels();
     window.addEventListener("focus", refreshModels);
     return () => {
       controller.abort();
       window.removeEventListener("focus", refreshModels);
     };
-  }, []);
+  }, [backend]);
 
   useEffect(() => {
     const controller = new AbortController();
     Promise.all([
       fetch(`${apiBaseUrl}/api/settings`, { cache: "no-store", signal: controller.signal }),
-      getAvailableWhisperModels(controller.signal),
-    ]).then(async ([settingsResponse, models]) => {
-        if (!settingsResponse.ok) throw new Error("Settings could not be loaded");
+      fetch(`${apiBaseUrl}/api/settings/transcription-capabilities`, { cache: "no-store", signal: controller.signal }),
+    ]).then(async ([settingsResponse, capabilitiesResponse]) => {
+        if (!settingsResponse.ok || !capabilitiesResponse.ok) throw new Error("Settings could not be loaded");
         const settings = await settingsResponse.json() as ApplicationSettings;
-        setAvailableModels(models);
+        setCapabilities(await capabilitiesResponse.json() as TranscriptionCapabilities);
         liveSettingsRef.current = settings.live_transcription;
         setLanguage(settings.general.default_language);
-        setModel(models.some(({ model }) => model === settings.live_transcription.default_live_model)
-          ? settings.live_transcription.default_live_model
-          : "");
+        setBackend(settings.transcription.backend);
+        setDevice(settings.transcription.device);
+        setComputeType(settings.transcription.compute_type);
+        setModel(settings.live_transcription.default_live_model);
       }).catch((loadError) => {
         if (loadError instanceof DOMException && loadError.name === "AbortError") return;
-        setModelsError(loadError instanceof Error ? loadError.message : "Available Whisper models could not be loaded");
-      }).finally(() => setModelsLoading(false));
+        setModelsError(loadError instanceof Error ? loadError.message : "Live transcription settings could not be loaded");
+      });
     return () => controller.abort();
   }, []);
 
@@ -1214,6 +1247,30 @@ export default function LivePage() {
   }, [stopAudio]);
 
   const canConfigure = ["idle", "completed", "failed"].includes(uiStatus);
+  const effectiveDevice = device === "auto"
+    ? (capabilities?.devices.some((item) => item.id === "cuda" && item.available) ? "cuda" : "cpu")
+    : device;
+  const validComputeTypes = capabilities?.compute_types[backend]?.[effectiveDevice] ?? [];
+
+  function updateRuntime(nextBackend: TranscriptionBackendName, nextDevice: TranscriptionDeviceName) {
+    const backendChanged = nextBackend !== backend;
+    const preset = capabilities?.recommended_by_backend[nextBackend];
+    const selectedDevice = backendChanged && preset ? preset.device : nextDevice;
+    setBackend(nextBackend);
+    setDevice(selectedDevice);
+    if (backendChanged && preset) setModel(preset.model);
+    const resolvedDevice = selectedDevice === "auto"
+      ? (capabilities?.devices.some((item) => item.id === "cuda" && item.available) ? "cuda" : "cpu")
+      : selectedDevice;
+    const valid = capabilities?.compute_types[nextBackend]?.[resolvedDevice] ?? [];
+    if (backendChanged && preset && valid.includes(preset.compute_type)) {
+      setComputeType(preset.compute_type);
+    } else if (nextBackend === "faster-whisper" && resolvedDevice === "cuda" && valid.includes("int8_float16") && computeType === "auto") {
+      setComputeType("int8_float16");
+    } else if (computeType !== "auto" && !valid.includes(computeType)) {
+      setComputeType(nextBackend === "faster-whisper" && resolvedDevice === "cuda" && valid.includes("int8_float16") ? "int8_float16" : valid[0] ?? "auto");
+    }
+  }
   const semanticSegments = Object.values(liveTranscriptUpdates).sort(
     (left, right) => left.sequenceStart - right.sequenceStart || left.segmentId.localeCompare(right.segmentId),
   );
@@ -1246,6 +1303,9 @@ export default function LivePage() {
 
       <section className="live-control-card">
         <div className="live-options">
+          <label>Transcription backend<select disabled={!canConfigure} onChange={(event) => updateRuntime(event.target.value as TranscriptionBackendName, device)} value={backend}>{capabilities?.backends.map((item) => <option disabled={!item.available} key={item.id} value={item.id}>{item.label}{item.available ? "" : " (Unavailable)"}</option>) ?? <option value="pytorch">Whisper PyTorch</option>}</select></label>
+          <label>Device<select disabled={!canConfigure} onChange={(event) => updateRuntime(backend, event.target.value as TranscriptionDeviceName)} value={device}><option value="auto">Auto</option>{capabilities?.devices.map((item) => <option disabled={!item.available} key={item.id} value={item.id}>{item.label}{item.available ? "" : " (Unavailable)"}</option>)}</select></label>
+          <label>Compute type<select disabled={!canConfigure} onChange={(event) => setComputeType(event.target.value as TranscriptionComputeType)} value={computeType}><option value="auto">Auto</option>{validComputeTypes.map((item) => <option key={item} value={item}>{item}</option>)}</select></label>
           <label>Language<select disabled={!canConfigure} onChange={(event) => setLanguage(event.target.value)} value={language}>{sourceLanguages.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
           <label>Target language<select disabled={!canConfigure} onChange={(event) => setTargetLanguage(event.target.value)} value={targetLanguage}><option value="en">English</option><option value="id">Bahasa Indonesia</option></select></label>
           <label>Microphone<select disabled={!canConfigure} onChange={(event) => setSelectedMicrophone(event.target.value)} value={selectedMicrophone}><option value="">System default</option>{microphones.map((device, index) => <option key={device.deviceId} value={device.deviceId}>{device.label || `Microphone ${index + 1}`}</option>)}</select></label>
@@ -1267,6 +1327,8 @@ export default function LivePage() {
           <div><span>Microphone</span><strong>{microphones.find((item) => item.deviceId === selectedMicrophone)?.label || "System default"}</strong></div>
           <div><span>Input level</span><strong><meter aria-label="Microphone input level" max="1" min="0" value={inputLevel}>{Math.round(inputLevel * 100)}%</meter></strong></div>
           <div><span>Audio transport</span><strong>{audioTransport === "pcm" ? "PCM16 · 16 kHz · 200 ms" : "Legacy WAV"}</strong></div>
+          <div><span>Backend</span><strong>{backend}</strong></div>
+          <div><span>Device / compute</span><strong>{effectiveDevice} / {computeType}</strong></div>
         </div>
         {audioTransport === "pcm" ? <div className="live-status-grid">
           <div><span>Chunks sent / ACK</span><strong>{pcmMetrics.chunksSent} / {pcmMetrics.chunksAcknowledged}</strong></div>

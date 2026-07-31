@@ -4,7 +4,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-WhisperModel = Literal["tiny", "base", "small", "medium", "large"]
+WhisperModel = Literal["tiny", "base", "small", "medium", "large", "large-v3"]
 WhisperModelStatus = Literal[
     "not_downloaded", "downloading", "available", "failed", "corrupted", "deleting"
 ]
@@ -57,7 +57,9 @@ class GeneralSettings(BaseModel):
 
 
 class TranscriptionSettings(BaseModel):
+    backend: Literal["pytorch", "faster-whisper"] = "pytorch"
     device: Literal["auto", "cpu", "cuda"] = "auto"
+    compute_type: Literal["auto", "float16", "float32", "int8_float16", "int8"] = "auto"
     fp16: bool = True
     beam_size: int = Field(default=5, ge=1, le=20)
     temperature: float = Field(default=0.0, ge=0, le=1)
@@ -198,3 +200,24 @@ class DeleteLocalFileResponse(BaseModel):
     id: str
     original_name: str
     bytes_deleted: int
+
+
+class TranscriptionBackendCapability(BaseModel):
+    id: Literal["pytorch", "faster-whisper"]
+    label: str
+    available: bool
+    reason: str | None = None
+
+
+class TranscriptionDeviceCapability(BaseModel):
+    id: Literal["cpu", "cuda"]
+    label: str
+    available: bool
+
+
+class TranscriptionCapabilitiesResponse(BaseModel):
+    backends: list[TranscriptionBackendCapability]
+    devices: list[TranscriptionDeviceCapability]
+    compute_types: dict[str, dict[str, list[str]]]
+    models: list[str]
+    recommended: dict[str, str]

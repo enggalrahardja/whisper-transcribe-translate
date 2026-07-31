@@ -1,7 +1,18 @@
 export const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://127.0.0.1:8000";
 
 export type JobStatus = "queued" | "processing" | "completed" | "failed" | "cancelled";
-export type WhisperModelName = "tiny" | "base" | "small" | "medium" | "large";
+export type WhisperModelName = "tiny" | "base" | "small" | "medium" | "large" | "large-v3";
+export type TranscriptionBackendName = "pytorch" | "faster-whisper";
+export type TranscriptionDeviceName = "auto" | "cpu" | "cuda";
+export type TranscriptionComputeType = "auto" | "float16" | "float32" | "int8_float16" | "int8";
+
+export type TranscriptionCapabilities = {
+  backends: Array<{ id: TranscriptionBackendName; label: string; available: boolean; reason: string | null }>;
+  devices: Array<{ id: "cpu" | "cuda"; label: string; available: boolean }>;
+  compute_types: Record<TranscriptionBackendName, Record<"cpu" | "cuda", TranscriptionComputeType[]>>;
+  models: WhisperModelName[];
+  recommended: { backend: TranscriptionBackendName; model: WhisperModelName; device: "cpu" | "cuda"; compute_type: TranscriptionComputeType };
+};
 export type WhisperModelStatus = "not_downloaded" | "downloading" | "available" | "failed" | "corrupted" | "deleting";
 
 export type WhisperModelRegistry = {
@@ -60,6 +71,9 @@ export type Job = {
   media_type: string;
   language: string;
   model: string;
+  transcription_backend: TranscriptionBackendName;
+  transcription_device: TranscriptionDeviceName;
+  transcription_compute_type: TranscriptionComputeType;
   task: string;
   target_language: string | null;
   transcription_config: AdvancedTranscriptionSettings | null;
@@ -70,11 +84,17 @@ export type Job = {
   file_size: number | null;
   content_type: string | null;
   error: string | null;
+  structured_error: Record<string, unknown> | null;
   model_load_metadata: {
+    requested_backend?: string;
+    active_backend?: string | null;
     requested_model: string;
     active_model: string | null;
     device: string;
     compute_type: string;
+    model_status?: string;
+    model_load_duration_seconds?: number;
+    inference_duration_seconds?: number;
     vram_free_bytes_before_load: number | null;
     vram_total_bytes_before_load: number | null;
   } | null;
@@ -213,7 +233,9 @@ export type ApplicationSettings = {
     theme_preference: "system" | "light" | "dark";
   };
   transcription: {
+    backend: TranscriptionBackendName;
     device: "auto" | "cpu" | "cuda";
+    compute_type: TranscriptionComputeType;
     fp16: boolean;
     beam_size: number;
     temperature: number;

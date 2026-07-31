@@ -15,6 +15,10 @@ import {
   retryWhisperModelDownload,
   scanWhisperModels,
   SettingsRuntime,
+  TranscriptionBackendName,
+  TranscriptionCapabilities,
+  TranscriptionComputeType,
+  TranscriptionDeviceName,
   verifyWhisperModel,
   WhisperModelName,
   WhisperModelRegistry,
@@ -74,6 +78,7 @@ export default function SettingsPage() {
   const [saved, setSaved] = useState<ApplicationSettings | null>(null);
   const [draft, setDraft] = useState<ApplicationSettings | null>(null);
   const [runtime, setRuntime] = useState<SettingsRuntime | null>(null);
+  const [capabilities, setCapabilities] = useState<TranscriptionCapabilities | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [cleaning, setCleaning] = useState(false);
@@ -93,9 +98,11 @@ export default function SettingsPage() {
     () => whisperModels?.filter((model) => model.status === "available") ?? [],
     [whisperModels],
   );
-  const defaultModelAvailable = Boolean(
-    draft && availableModels.some((model) => model.model === draft.general.default_whisper_model),
-  );
+  const selectableModelNames = useMemo(() => {
+    if (draft?.transcription.backend === "faster-whisper") return capabilities?.models ?? [];
+    return availableModels.map(({ model }) => model);
+  }, [availableModels, capabilities, draft?.transcription.backend]);
+  const defaultModelAvailable = Boolean(draft && selectableModelNames.includes(draft.general.default_whisper_model));
   const defaultLiveModelAvailable = Boolean(
     draft && availableModels.some((model) => model.model === draft.live_transcription.default_live_model),
   );
@@ -130,14 +137,17 @@ export default function SettingsPage() {
       fetch(`${apiBaseUrl}/api/settings`, { cache: "no-store", signal: controller.signal }),
       fetch(`${apiBaseUrl}/api/settings/runtime`, { cache: "no-store", signal: controller.signal }),
       getWhisperModels(controller.signal),
-    ]).then(async ([settingsResponse, runtimeResponse, loadedModels]) => {
+      fetch(`${apiBaseUrl}/api/settings/transcription-capabilities`, { cache: "no-store", signal: controller.signal }),
+    ]).then(async ([settingsResponse, runtimeResponse, loadedModels, capabilitiesResponse]) => {
       if (!settingsResponse.ok) throw new Error(await responseError(settingsResponse, "Settings could not be loaded"));
       if (!runtimeResponse.ok) throw new Error(await responseError(runtimeResponse, "Runtime status could not be loaded"));
+      if (!capabilitiesResponse.ok) throw new Error(await responseError(capabilitiesResponse, "Transcription capabilities could not be loaded"));
       const loaded = await settingsResponse.json() as ApplicationSettings;
       setSaved(loaded);
       setDraft(cloneSettings(loaded));
       setRuntime(await runtimeResponse.json());
       setWhisperModels(loadedModels);
+      setCapabilities(await capabilitiesResponse.json() as TranscriptionCapabilities);
     }).catch((error) => {
       if (error instanceof DOMException && error.name === "AbortError") return;
       setFeedback({ type: "error", message: error instanceof Error ? error.message : "Settings could not be loaded" });
@@ -208,6 +218,31 @@ export default function SettingsPage() {
       ...current,
       [section]: { ...current[section], [field]: value },
     }) : current);
+    setFeedback(null);
+  }
+
+  function updateTranscriptionRuntime(field: "backend" | "device" | "compute_type", value: string) {
+    setDraft((current) => {
+      if (!current) return current;
+      const transcription = { ...current.transcription, [field]: value };
+      const general = { ...current.general };
+      const backend = transcription.backend as TranscriptionBackendName;
+      const requestedDevice = transcription.device as TranscriptionDeviceName;
+      const effectiveDevice = requestedDevice === "auto"
+        ? (capabilities?.devices.some((item) => item.id === "cuda" && item.available) ? "cuda" : "cpu")
+        : requestedDevice;
+      const valid = capabilities?.compute_types[backend]?.[effectiveDevice] ?? [];
+      if (backend === "faster-whisper" && effectiveDevice === "cuda" && valid.includes("int8_float16") && transcription.compute_type === "auto") {
+        transcription.compute_type = "int8_float16";
+      } else if (transcription.compute_type !== "auto" && !valid.includes(transcription.compute_type as TranscriptionComputeType)) {
+        transcription.compute_type = backend === "faster-whisper" && effectiveDevice === "cuda" && valid.includes("int8_float16")
+          ? "int8_float16"
+          : valid[0] ?? "auto";
+      }
+      if (backend === "faster-whisper" && general.default_whisper_model === "large") general.default_whisper_model = "large-v3";
+      if (backend === "pytorch" && general.default_whisper_model === "large-v3" && availableModels.some((item) => item.model === "large")) general.default_whisper_model = "large";
+      return { ...current, general, transcription };
+    });
     setFeedback(null);
   }
 
@@ -440,6 +475,10 @@ export default function SettingsPage() {
     whisperModels?.some((model) => model.status === "downloading" || model.status === "deleting"),
   );
   const modelActionsDisabled = disabled || modelAction !== null;
+  const effectiveTranscriptionDevice = draft.transcription.device === "auto"
+    ? (capabilities?.devices.some((item) => item.id === "cuda" && item.available) ? "cuda" : "cpu")
+    : draft.transcription.device;
+  const validComputeTypes = capabilities?.compute_types[draft.transcription.backend]?.[effectiveTranscriptionDevice] ?? [];
   return (
     <section className="settings-page">
       <header className="settings-header">
@@ -478,7 +517,6 @@ export default function SettingsPage() {
           <div className="settings-section-heading"><div><p className="eyebrow">GENERAL</p><h2>Workspace defaults</h2></div></div>
           <div className="settings-grid">
             <label>Default language<select disabled={disabled} value={draft.general.default_language} onChange={(event) => update("general", "default_language", event.target.value)}>{sourceLanguages.map(([value, label]) => <option key={value} value={value}>{label}</option>)}</select></label>
-            <label>Default Whisper model<select disabled={disabled} value={defaultModelAvailable ? draft.general.default_whisper_model : ""} onChange={(event) => update("general", "default_whisper_model", event.target.value)}><option disabled value="">Select an available model</option>{availableModels.map(({ model }) => <option key={model} value={model}>{model}</option>)}</select>{!defaultModelAvailable ? <small className="model-warning" role="alert">Current default “{draft.general.default_whisper_model}” is not available. Select an available model before saving.</small> : null}</label>
             <label>Default task<select disabled={disabled} value={draft.general.default_task} onChange={(event) => update("general", "default_task", event.target.value)}><option value="transcribe">Transcribe</option><option value="translate">Translate</option></select></label>
             <label>Timezone<input disabled={disabled} list="timezone-options" value={draft.general.timezone} onChange={(event) => update("general", "timezone", event.target.value)} /><datalist id="timezone-options"><option value="UTC" /><option value="Asia/Jakarta" /><option value="Asia/Makassar" /><option value="Asia/Jayapura" /><option value="Indian/Christmas" /></datalist></label>
             <label>Theme preference<select disabled={disabled} value={draft.general.theme_preference} onChange={(event) => update("general", "theme_preference", event.target.value)}><option value="system">System</option><option value="light">Light</option><option value="dark">Dark</option></select></label>
@@ -528,12 +566,16 @@ export default function SettingsPage() {
         <section aria-labelledby="settings-tab-transcription" className="settings-card" hidden={activeTab !== "transcription"} id="settings-panel-transcription" role="tabpanel">
           <div className="settings-section-heading"><div><p className="eyebrow">TRANSCRIPTION</p><h2>Whisper decoding</h2></div></div>
           <div className="settings-grid">
-            <label>Device <span className="restart-badge">Restart required</span><select disabled={disabled} value={draft.transcription.device} onChange={(event) => update("transcription", "device", event.target.value)}><option value="auto">Auto</option><option value="cpu">CPU</option><option value="cuda">CUDA</option></select></label>
+            <label>Transcription Backend <span className="restart-badge">Restart required</span><select disabled={disabled} value={draft.transcription.backend} onChange={(event) => updateTranscriptionRuntime("backend", event.target.value)}>{capabilities?.backends.map((backend) => <option disabled={!backend.available} key={backend.id} value={backend.id}>{backend.label}{backend.available ? "" : " (Unavailable)"}</option>) ?? <option value="pytorch">Whisper PyTorch</option>}</select><small>{draft.transcription.backend === "pytorch" ? "Compatible with the existing Whisper implementation. Large models require more VRAM." : "CTranslate2-based backend optimized for memory-efficient inference."}</small>{capabilities?.backends.find((item) => item.id === draft.transcription.backend)?.reason ? <small className="model-warning">{capabilities.backends.find((item) => item.id === draft.transcription.backend)?.reason}</small> : null}</label>
+            <label>Whisper Model<select disabled={disabled} value={defaultModelAvailable ? draft.general.default_whisper_model : ""} onChange={(event) => update("general", "default_whisper_model", event.target.value)}><option disabled value="">Select a model</option>{selectableModelNames.map((model) => <option key={model} value={model}>{model}</option>)}</select>{!defaultModelAvailable ? <small className="model-warning" role="alert">Current default “{draft.general.default_whisper_model}” is unavailable for this backend.</small> : null}</label>
+            <label>Device <span className="restart-badge">Restart required</span><select disabled={disabled} value={draft.transcription.device} onChange={(event) => updateTranscriptionRuntime("device", event.target.value)}><option value="auto">Auto</option>{capabilities?.devices.map((device) => <option disabled={!device.available} key={device.id} value={device.id}>{device.label}{device.available ? "" : " (Unavailable)"}</option>) ?? <><option value="cpu">CPU</option><option value="cuda">CUDA</option></>}</select></label>
+            <label>Compute Type <span className="restart-badge">Restart required</span><select disabled={disabled} value={draft.transcription.compute_type} onChange={(event) => updateTranscriptionRuntime("compute_type", event.target.value)}><option value="auto">Auto</option>{validComputeTypes.map((computeType) => <option key={computeType} value={computeType}>{computeType}</option>)}</select></label>
+            {draft.transcription.backend === "pytorch" && ["large", "large-v3"].includes(draft.general.default_whisper_model) && effectiveTranscriptionDevice === "cuda" ? <p className="model-warning settings-wide" role="alert">large-v3 with Whisper PyTorch requires substantial VRAM and may fail on an 8 GB GPU.</p> : null}
+            {draft.transcription.backend === "faster-whisper" && draft.general.default_whisper_model === "large-v3" && effectiveTranscriptionDevice === "cuda" && draft.transcription.compute_type === "int8_float16" ? <p className="recommendation-badge settings-wide">Recommended for 8 GB VRAM</p> : null}
             <label>Beam size<input disabled={disabled} min="1" max="20" type="number" value={draft.transcription.beam_size} onChange={(event) => update("transcription", "beam_size", Number(event.target.value))} /></label>
             <label>Temperature<input disabled={disabled} min="0" max="1" step="0.05" type="number" value={draft.transcription.temperature} onChange={(event) => update("transcription", "temperature", Number(event.target.value))} /></label>
             <label>Maximum concurrent jobs <span className="restart-badge">Restart required</span><input disabled={disabled} min="1" max="8" type="number" value={draft.transcription.maximum_concurrent_transcription_jobs} onChange={(event) => update("transcription", "maximum_concurrent_transcription_jobs", Number(event.target.value))} /></label>
             <label className="settings-wide">Initial prompt<textarea disabled={disabled} maxLength={4000} rows={3} value={draft.transcription.initial_prompt} onChange={(event) => update("transcription", "initial_prompt", event.target.value)} /></label>
-            <label className="toggle-field"><input checked={draft.transcription.fp16} disabled={disabled} type="checkbox" onChange={(event) => update("transcription", "fp16", event.target.checked)} />Use FP16 when CUDA is active</label>
             <label className="toggle-field"><input checked={draft.transcription.word_timestamps} disabled={disabled} type="checkbox" onChange={(event) => update("transcription", "word_timestamps", event.target.checked)} />Generate word timestamps</label>
           </div>
         </section>

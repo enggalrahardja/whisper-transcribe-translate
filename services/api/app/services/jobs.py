@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from datetime import datetime, timezone
 
 from bson import ObjectId
@@ -12,6 +13,8 @@ from .translation_adapter import normalize_target_language
 from .transcripts import COLLECTION_NAME as TRANSCRIPTS_COLLECTION
 from .storage import resolve_storage_file
 from .whisper_models import require_whisper_model_available, whisper_model_usage
+from .application_settings import get_application_settings
+from .transcription_backends import BackendConfig, TranscriptionBackendError, resolve_backend_config, pytorch_model_name
 
 SUBTITLE_PROJECTS_COLLECTION = "subtitle_projects"
 
@@ -31,6 +34,9 @@ def _serialize_job(document: dict) -> JobResponse:
         media_type=document["media_type"],
         language=document["language"],
         model=document["model"],
+        transcription_backend=document.get("transcription_backend", "pytorch"),
+        transcription_device=document.get("transcription_device", "auto"),
+        transcription_compute_type=document.get("transcription_compute_type", "auto"),
         task=document["task"],
         target_language=document.get("target_language"),
         transcription_config=document.get("transcription_config"),
@@ -41,6 +47,7 @@ def _serialize_job(document: dict) -> JobResponse:
         file_size=document.get("file_size"),
         content_type=document.get("content_type"),
         error=document.get("error"),
+        structured_error=document.get("structured_error"),
         error_traceback=document.get("error_traceback"),
         failure_history=document.get("failure_history", []),
         model_load_metadata=document.get("model_load_metadata"),
@@ -72,8 +79,43 @@ def _insert_job(document: dict) -> JobResponse:
     return _serialize_job(document)
 
 
+def resolve_job_backend_config(
+    model: str,
+    backend: str | None = None,
+    device: str | None = None,
+    compute_type: str | None = None,
+) -> BackendConfig:
+    settings = get_application_settings().transcription
+    try:
+        return resolve_backend_config(
+            backend or settings.backend,
+            model,
+            device or settings.device,
+            compute_type or settings.compute_type,
+        )
+    except TranscriptionBackendError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+
+def transcription_model_reservation(config: BackendConfig, owner: str):
+    if config.backend == "pytorch":
+        return whisper_model_usage(pytorch_model_name(config.model), owner)
+    return nullcontext()
+
+
 def create_job(payload: CreateJobRequest) -> JobResponse:
     document = payload.model_dump()
+    config = resolve_job_backend_config(
+        payload.model,
+        payload.transcription_backend,
+        payload.transcription_device,
+        payload.transcription_compute_type,
+    )
+    document.update(
+        transcription_backend=payload.transcription_backend or get_application_settings().transcription.backend,
+        transcription_device=payload.transcription_device or get_application_settings().transcription.device,
+        transcription_compute_type=payload.transcription_compute_type or get_application_settings().transcription.compute_type,
+    )
     if payload.transcription_config and payload.transcription_config.apply_glossary:
         try:
             resolve_job_glossary(str(payload.transcription_config.glossary_id))
@@ -84,7 +126,7 @@ def create_job(payload: CreateJobRequest) -> JobResponse:
             document["target_language"] = normalize_target_language(payload.target_language)
         except ValueError as exc:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
-    with whisper_model_usage(payload.model, "job-create"):
+    with transcription_model_reservation(config, "job-create"):
         return _insert_job(document)
 
 
@@ -97,7 +139,13 @@ def create_uploaded_job(
     target_language: str | None = None,
     availability_reserved: bool = False,
     transcription_config: dict[str, object] | None = None,
+    transcription_backend: str | None = None,
+    transcription_device: str | None = None,
+    transcription_compute_type: str | None = None,
 ) -> JobResponse:
+    backend_config = resolve_job_backend_config(
+        model, transcription_backend, transcription_device, transcription_compute_type
+    )
     if transcription_config and transcription_config.get("apply_glossary"):
         try:
             resolve_job_glossary(str(transcription_config.get("glossary_id")))
@@ -113,6 +161,9 @@ def create_uploaded_job(
         "media_file_id": media_file_id,
         "language": language,
         "model": model,
+        "transcription_backend": transcription_backend or get_application_settings().transcription.backend,
+        "transcription_device": transcription_device or get_application_settings().transcription.device,
+        "transcription_compute_type": transcription_compute_type or get_application_settings().transcription.compute_type,
         "task": task,
         "target_language": target_language,
     }
@@ -120,7 +171,7 @@ def create_uploaded_job(
         document["transcription_config"] = transcription_config
     if availability_reserved:
         return _insert_job(document)
-    with whisper_model_usage(model, "uploaded-job-create"):
+    with transcription_model_reservation(backend_config, "uploaded-job-create"):
         return _insert_job(document)
 
 
@@ -178,12 +229,19 @@ def retry_job(job_id: str) -> JobResponse:
             detail="Only failed or cancelled jobs can be retried",
         )
     model = str(current.get("model", "base"))
-    require_whisper_model_available(model)
+    config = resolve_job_backend_config(
+        model,
+        str(current.get("transcription_backend", "pytorch")),
+        str(current.get("transcription_device", "auto")),
+        str(current.get("transcription_compute_type", "auto")),
+    )
+    if config.backend == "pytorch":
+        require_whisper_model_available(pytorch_model_name(config.model))
     if current["status"] == JobStatus.QUEUED.value:
         return _serialize_job(current)
     now = datetime.now(timezone.utc)
     collection = get_database()[COLLECTION_NAME]
-    with whisper_model_usage(model, "job-retry"):
+    with transcription_model_reservation(config, "job-retry"):
         document = collection.find_one_and_update(
             {"_id": job_object_id, "status": {"$in": [JobStatus.FAILED.value, JobStatus.CANCELLED.value]}},
             {

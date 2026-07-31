@@ -18,12 +18,15 @@ from ..models.settings import (
     WorkerRuntimeResponse,
 )
 from .whisper_models import is_whisper_model_available
+from .transcription_backends import TranscriptionBackendError, resolve_backend_config
 
 COLLECTION_NAME = "application_settings"
 RUNTIME_COLLECTION = "worker_runtime"
 ACTIVE_DOCUMENT_ID = "active"
 RESTART_REQUIRED_FIELDS = [
+    "transcription.backend",
     "transcription.device",
+    "transcription.compute_type",
     "transcription.maximum_concurrent_transcription_jobs",
 ]
 CACHE_TTL_SECONDS = 5.0
@@ -171,7 +174,18 @@ def update_application_settings(payload: UpdateApplicationSettingsRequest) -> Ap
             detail=f"Version conflict: current version is {current['version']}",
         )
     _prepare_storage_locations(values, current)
-    if not is_whisper_model_available(values.general.default_whisper_model):
+    try:
+        resolve_backend_config(
+            values.transcription.backend,
+            values.general.default_whisper_model,
+            values.transcription.device,
+            values.transcription.compute_type,
+        )
+    except TranscriptionBackendError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    if values.transcription.backend == "pytorch" and not is_whisper_model_available(
+        "large" if values.general.default_whisper_model == "large-v3" else values.general.default_whisper_model
+    ):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=(
@@ -249,8 +263,12 @@ def get_runtime_status() -> WorkerRuntimeResponse:
     jobs = database["transcription_jobs"]
     pending_fields: list[str] = []
     if primary:
+        if primary.get("effective_backend_setting") != settings.transcription.backend:
+            pending_fields.append("transcription.backend")
         if primary.get("effective_device_setting") != settings.transcription.device:
             pending_fields.append("transcription.device")
+        if primary.get("effective_compute_type_setting") != settings.transcription.compute_type:
+            pending_fields.append("transcription.compute_type")
         if primary.get("configured_concurrency") != settings.transcription.maximum_concurrent_transcription_jobs:
             pending_fields.append("transcription.maximum_concurrent_transcription_jobs")
     status_value = "disabled" if not worker_settings.worker_enabled else "online" if runtime_documents else "offline"

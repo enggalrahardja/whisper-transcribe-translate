@@ -8,6 +8,7 @@ from ..models.settings import (
     CleanupResponse,
     DeleteLocalFileResponse,
     LocalFileResponse,
+    TranscriptionCapabilitiesResponse,
     UpdateApplicationSettingsRequest,
     WhisperModel,
     WhisperModelResponse,
@@ -20,6 +21,7 @@ from ..services.application_settings import (
     update_application_settings,
 )
 from ..services.media_files import delete_local_file, list_local_files
+from ..services.transcription_backends import runtime_capabilities
 from ..services.whisper_models import (
     WhisperModelActionConflict,
     cancel_whisper_model_download,
@@ -73,6 +75,11 @@ def get_runtime() -> WorkerRuntimeResponse:
 @router.post("/cleanup", response_model=CleanupResponse)
 def cleanup() -> CleanupResponse:
     return run_retention_cleanup()
+
+
+@router.get("/transcription-capabilities", response_model=TranscriptionCapabilitiesResponse)
+def get_transcription_capabilities() -> TranscriptionCapabilitiesResponse:
+    return TranscriptionCapabilitiesResponse.model_validate(runtime_capabilities())
 
 
 @router.get("/local-files", response_model=list[LocalFileResponse])

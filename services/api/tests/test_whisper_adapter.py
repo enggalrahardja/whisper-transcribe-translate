@@ -11,6 +11,7 @@ import torch
 from bson import ObjectId
 
 from app.services.whisper_adapter import WhisperAdapter
+from app.services.transcription_backends import BackendOutOfMemoryError
 from app.worker import TranscriptionWorker
 
 
@@ -224,7 +225,8 @@ class WorkerCudaOomTests(unittest.TestCase):
                 self.released = False
 
             def load_model(self, *_args, **_kwargs):
-                raise torch.cuda.OutOfMemoryError("test OOM")
+                self.released = True
+                raise BackendOutOfMemoryError("oom_load", "test OOM", stage="load")
 
             def release_cache(self):
                 self.released = True
@@ -256,6 +258,9 @@ class WorkerCudaOomTests(unittest.TestCase):
         }
         settings = SimpleNamespace(
             transcription=SimpleNamespace(
+                backend="pytorch",
+                device="cuda",
+                compute_type="float16",
                 fp16=True,
                 beam_size=5,
                 temperature=0.0,

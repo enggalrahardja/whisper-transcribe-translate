@@ -395,6 +395,7 @@ header p, .service-card p, .jobs-panel p { color: #687086; }
 .previous-storage-locations summary { font-weight: 700; cursor: pointer; }
 .previous-storage-locations ul { margin: 9px 0 0; padding-left: 22px; }
 .previous-storage-locations code { overflow-wrap: anywhere; }
+.recommendation-badge { width: fit-content; margin: 0; padding: 7px 10px; border: 1px solid #9dd8ba; border-radius: 999px; color: #17633c; background: #eefbf4; font-size: 11px; font-weight: 800; }
 .cleanup-summary, .runtime-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 11px; margin: 20px 0 0; }
 .cleanup-summary > div, .runtime-grid > div { min-width: 0; padding: 12px; border: 1px solid #e8eaf1; border-radius: 10px; }
 .cleanup-summary dt, .runtime-grid dt { margin-bottom: 5px; color: #737b91; font-size: 10px; font-weight: 800; text-transform: uppercase; }

@@ -2,11 +2,10 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile, status
 from pydantic import ValidationError
 
 from ..models.job import AdvancedTranscriptionSettings, JobResponse
-from ..services.jobs import create_uploaded_job
+from ..services.jobs import create_uploaded_job, resolve_job_backend_config, transcription_model_reservation
 from ..services.media_files import create_media_file
 from ..services.storage import save_upload
 from ..services.translation_adapter import normalize_target_language
-from ..services.whisper_models import whisper_model_usage
 
 router = APIRouter(prefix="/api/uploads", tags=["uploads"])
 
@@ -15,12 +14,20 @@ router = APIRouter(prefix="/api/uploads", tags=["uploads"])
 async def upload_media(
     file: UploadFile = File(...),
     language: str = Form(default="auto"),
-    model: str = Form(default="base", pattern="^(tiny|base|small|medium|large)$"),
+    model: str = Form(default="base", pattern="^(tiny|base|small|medium|large|large-v3)$"),
+    transcription_backend: str | None = Form(default=None, pattern="^(pytorch|faster-whisper)$"),
+    transcription_device: str | None = Form(default=None, pattern="^(auto|cpu|cuda)$"),
+    transcription_compute_type: str | None = Form(
+        default=None, pattern="^(auto|float16|float32|int8_float16|int8)$"
+    ),
     task: str = Form(default="transcribe", pattern="^(transcribe|translate)$"),
     target_language: str | None = Form(default=None),
     transcription_config: str | None = Form(default=None),
 ) -> JobResponse:
-    with whisper_model_usage(model, "upload-request"):
+    backend_config = resolve_job_backend_config(
+        model, transcription_backend, transcription_device, transcription_compute_type
+    )
+    with transcription_model_reservation(backend_config, "upload-request"):
         if task == "translate":
             try:
                 target_language = normalize_target_language(target_language)
@@ -46,4 +53,7 @@ async def upload_media(
             target_language=target_language,
             availability_reserved=True,
             transcription_config=parsed_config.model_dump() if parsed_config else None,
+            transcription_backend=transcription_backend,
+            transcription_device=transcription_device,
+            transcription_compute_type=transcription_compute_type,
         )

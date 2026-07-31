@@ -52,7 +52,12 @@ class CreateJobRequest(BaseModel):
     file_name: str = Field(min_length=1, max_length=255)
     media_type: str = Field(default="audio", pattern="^(audio|video)$")
     language: str = Field(default="auto", min_length=2, max_length=50)
-    model: str = Field(default="base", pattern="^(tiny|base|small|medium|large)$")
+    model: str = Field(default="base", pattern="^(tiny|base|small|medium|large|large-v3)$")
+    transcription_backend: str | None = Field(default=None, pattern="^(pytorch|faster-whisper)$")
+    transcription_device: str | None = Field(default=None, pattern="^(auto|cpu|cuda)$")
+    transcription_compute_type: str | None = Field(
+        default=None, pattern="^(auto|float16|float32|int8_float16|int8)$"
+    )
     task: str = Field(default="transcribe", pattern="^(transcribe|translate)$")
     target_language: str | None = Field(default=None, min_length=2, max_length=50)
     transcription_config: AdvancedTranscriptionSettings | None = None
@@ -70,6 +75,9 @@ class JobResponse(BaseModel):
     media_type: str
     language: str
     model: str
+    transcription_backend: str = "pytorch"
+    transcription_device: str = "auto"
+    transcription_compute_type: str = "auto"
     task: str
     target_language: str | None = None
     transcription_config: AdvancedTranscriptionSettings | None = None
@@ -80,6 +88,7 @@ class JobResponse(BaseModel):
     file_size: int | None = None
     content_type: str | None = None
     error: str | None = None
+    structured_error: dict[str, object] | None = None
     error_traceback: str | None = None
     failure_history: list[dict[str, object]] = Field(default_factory=list)
     model_load_metadata: dict[str, object] | None = None

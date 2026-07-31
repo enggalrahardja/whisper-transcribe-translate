@@ -14,6 +14,7 @@ PINNED_WORKER_DEPENDENCIES: dict[str, str | None] = {
     "torch": "2.13.0",
     "torchaudio": "2.11.0",
 }
+OPTIONAL_BACKEND_DEPENDENCIES = ("faster-whisper", "ctranslate2")
 
 if platform.system() == "Linux" and platform.machine() == "x86_64":
     PINNED_WORKER_DEPENDENCIES["triton"] = "3.7.1"
@@ -25,7 +26,7 @@ class WorkerDependencyMismatch(RuntimeError):
 
 def worker_dependency_versions() -> dict[str, str | None]:
     versions: dict[str, str | None] = {}
-    for package in PINNED_WORKER_DEPENDENCIES:
+    for package in (*PINNED_WORKER_DEPENDENCIES, *OPTIONAL_BACKEND_DEPENDENCIES):
         try:
             versions[package] = version(package)
         except PackageNotFoundError:

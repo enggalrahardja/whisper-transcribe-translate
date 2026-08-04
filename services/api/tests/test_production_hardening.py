@@ -199,6 +199,7 @@ class ProductionConfigurationTests(unittest.TestCase):
     def test_production_rejects_placeholder_and_missing_model(self):
         base = dict(
             app_env="production", security_auth_enabled=True,
+            security_connection_ticket_secret="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
             web_origin="https://app.example", security_trusted_origins="https://app.example",
         )
         with self.assertRaisesRegex(ValueError, "non-default"):
@@ -216,6 +217,7 @@ class ProductionConfigurationTests(unittest.TestCase):
             config = settings(
                 app_env="production", security_auth_enabled=True,
                 security_tokens_json='{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa":{"userId":"admin","role":"admin"}}',
+                security_connection_ticket_secret="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                 web_origin="https://app.example", security_trusted_origins="https://app.example", security_require_https=True,
                 whisper_model_dir=model_dir, security_profile="Private",
             )

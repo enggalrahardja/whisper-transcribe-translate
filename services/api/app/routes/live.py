@@ -14,6 +14,7 @@ from ..security import (
     Principal, authorize_owner, enforce_concurrent_limit, is_allowed_web_origin,
     rate_limiter, rate_limit_or_raise, require_admin, require_principal,
     safe_error, validate_audio_frame_size, websocket_idle_expired, websocket_principal,
+    issue_websocket_ticket,
 )
 from ..services.production_hardening import audit_event
 from ..services.live_processor import process_live_chunk
@@ -1492,6 +1493,16 @@ def get_session(session_id: str, principal: Principal = Depends(require_principa
     return get_live_session(session_id)
 
 
+@router.post("/api/live/sessions/{session_id}/connection-ticket")
+def create_connection_ticket(session_id: str, principal: Principal = Depends(require_principal)) -> dict[str, object]:
+    authorize_owner(principal, get_live_session_owner(session_id))
+    session = get_live_session(session_id)
+    if session.status not in {"active", "paused"}:
+        raise HTTPException(status_code=409, detail="Live session is not connectable")
+    ticket, expires_at = issue_websocket_ticket(principal, session_id)
+    return {"ticket": ticket, "expiresAt": expires_at, "sessionId": session_id}
+
+
 @router.post("/api/live/sessions/{session_id}/stop", response_model=LiveSessionResponse)
 async def stop_session(session_id: str, principal: Principal = Depends(require_principal)) -> LiveSessionResponse:
     authorize_owner(principal, get_live_session_owner(session_id))
@@ -1528,7 +1539,7 @@ async def live_websocket(websocket: WebSocket, session_id: str) -> None:
         await websocket.close(code=1008, reason="WebSocket origin is not allowed")
         return
     try:
-        principal = websocket_principal(websocket)
+        principal = websocket_principal(websocket, session_id)
     except HTTPException:
         try:
             audit_event("auth_failure", outcome="rejected", metadata={"transport": "websocket"})

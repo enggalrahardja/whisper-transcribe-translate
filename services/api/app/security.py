@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import hmac
+import base64
+import hashlib
 import json
 import re
 from collections import deque
 from dataclasses import dataclass
 from threading import RLock
-from time import monotonic
+from time import monotonic, time
 from typing import Callable
 from urllib.parse import urlsplit
 
@@ -101,7 +103,33 @@ def require_admin(principal: Principal) -> None:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Administrator access required")
 
 
-def websocket_principal(websocket: WebSocket) -> Principal:
+def issue_websocket_ticket(principal: Principal, session_id: str) -> tuple[str, int]:
+    settings = get_settings()
+    secret = settings.security_connection_ticket_secret
+    if not secret:
+        raise HTTPException(status_code=503, detail="Connection tickets are not configured")
+    expires_at = int(time()) + settings.security_connection_ticket_ttl_seconds
+    payload = base64.urlsafe_b64encode(json.dumps({"sub": principal.user_id, "sid": session_id, "exp": expires_at}, separators=(",", ":")).encode()).decode().rstrip("=")
+    signature = hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    return f"swt1.{payload}.{signature}", expires_at
+
+
+def _ticket_principal(token: str, session_id: str) -> Principal:
+    settings = get_settings()
+    try:
+        version, payload, signature = token.split(".", 2)
+        expected = hmac.new(settings.security_connection_ticket_secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
+        if version != "swt1" or not settings.security_connection_ticket_secret or not hmac.compare_digest(signature, expected):
+            raise ValueError
+        decoded = json.loads(base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)))
+        if decoded.get("sid") != session_id or int(decoded.get("exp", 0)) < int(time()) or not decoded.get("sub"):
+            raise ValueError
+        return Principal(str(decoded["sub"]))
+    except (ValueError, TypeError, json.JSONDecodeError):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid connection ticket")
+
+
+def websocket_principal(websocket: WebSocket, session_id: str | None = None) -> Principal:
     token = _bearer(websocket.headers.get("authorization"))
     if token is None:
         protocols = [item.strip() for item in websocket.headers.get("sec-websocket-protocol", "").split(",") if item.strip()]
@@ -109,6 +137,8 @@ def websocket_principal(websocket: WebSocket) -> Principal:
             token = protocols[1]
     if token is None:
         token = websocket.query_params.get("access_token")
+    if token and token.startswith("swt1.") and session_id:
+        return _ticket_principal(token, session_id)
     return authenticate_token(token)
 
 

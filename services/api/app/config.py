@@ -21,6 +21,8 @@ class Settings(BaseSettings):
     release_profiles_path: Path = PROJECT_ROOT / "config/release-profiles.json"
     security_auth_enabled: bool = False
     security_tokens_json: str = "{}"
+    security_connection_ticket_secret: str = ""
+    security_connection_ticket_ttl_seconds: int = 60
     security_trusted_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
     security_require_https: bool = False
     security_profile: str = "Fast"
@@ -251,6 +253,10 @@ def validate_startup_configuration(settings: Settings) -> None:
         for token in tokens
     ):
         raise ValueError("Production requires non-default bearer tokens of at least 32 characters")
+    if len(settings.security_connection_ticket_secret) < 32:
+        raise ValueError("Production requires a connection ticket secret of at least 32 characters")
+    if not 15 <= settings.security_connection_ticket_ttl_seconds <= 300:
+        raise ValueError("Connection ticket TTL must be between 15 and 300 seconds")
     if len(tokens) > 10_000 or any(
         isinstance(value, dict) and (
             not value.get("userId") or value.get("role", "user") not in {"user", "admin"}

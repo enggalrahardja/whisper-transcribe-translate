@@ -82,6 +82,7 @@ class ReleaseProfileTests(unittest.TestCase):
                 _env_file=None, app_env="production", app_debug=False,
                 security_auth_enabled=True,
                 security_tokens_json='{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa":{"userId":"admin","role":"admin"}}',
+                security_connection_ticket_secret="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
                 web_origin="https://app.example",
                 security_trusted_origins="https://app.example",
                 security_require_https=True, whisper_model_dir=model_dir,
